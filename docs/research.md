@@ -845,12 +845,70 @@ else:
 
 ---
 
-## 行动项
+## Roadmap
 
-1. ✅ 竞品调研 + 架构设计完成
-2. ✅ Gas 成本评估 + 代付机制设计完成
-3. → 部署 `fractalmind_envd::peer` + `fractalmind_envd::sponsor` 合约到 SUI Testnet
-4. → Gas Sponsor Service 开发 (轻量 HTTP, 可选)
-5. → envd 集成 WireGuard (Go `wireguard-go` 或 `wgctrl`)
-6. → envd 集成 SUI Client (读 events, 写 transactions, 支持 sponsored TX)
-7. → 本机 + RoseX 双机验证
+### Phase 1: 调研 + 设计 ✅ COMPLETE
+
+> 目标: 明确架构方向, 完成技术选型
+
+- ✅ 竞品调研 (花生壳, ToDesk, TeamViewer, Tailscale)
+- ✅ 架构设计: SUI 链上控制面 + WireGuard P2P 数据面
+- ✅ SUI 合约设计 (`peer.move` + `sponsor.move`)
+- ✅ Gas 成本评估 + 代付机制设计
+- ✅ 吸收竞品优势: WireGuard P2P, E2E 加密, STUN/TURN 穿透, 无状态 Relay
+
+### Phase 2: SUI 合约部署 + 验证
+
+> 目标: 链上基础设施就绪
+
+- 部署 `fractalmind_envd::peer` 合约到 SUI Testnet
+- 部署 `fractalmind_envd::sponsor` 合约到 SUI Testnet
+- SDK 验证: register_peer → update_endpoints → go_offline/online → deregister
+- Event 查询验证: queryEvents(PeerRegistered, filter: org_id)
+- Gas 代付验证: Sponsored Transaction 端到端测试
+
+### Phase 3: envd v2 核心 (WireGuard + SUI)
+
+> 目标: envd 从 WebSocket 架构升级为 WireGuard P2P + SUI 链上
+
+- envd 集成 SUI Client (Go `sui-go-sdk`)
+  - 启动: 读 org_id → 查询 PeerRegistered 事件 → 获取 peer 列表
+  - 注册: register_peer(cert, wg_pubkey, endpoints)
+  - 运行时: 订阅 SUI Events (实时发现新节点)
+  - 关闭: go_offline()
+- envd 集成 WireGuard (Go `wireguard-go` 或 `wgctrl`)
+  - 生成/加载 WireGuard keypair
+  - 动态添加/移除 peer (基于 SUI Events)
+  - P2P tunnel 建立 + 心跳
+- STUN Client: NAT endpoint 发现 (公网 IP:port)
+- Sponsored TX 集成 (可选): 向 Gas Sponsor Service 提交 partial-signed TX
+
+### Phase 4: Relay + 穿透保障
+
+> 目标: 处理 NAT 穿透失败场景, 保证 100% 连通
+
+- TURN Relay 服务 (无状态, 仅转发加密 WireGuard 包)
+- 连接策略: WireGuard P2P → STUN 重试 → TURN Relay 兜底
+- endpoint 自动更新: IP 漂移检测 → update_endpoints 上链
+- Gas Sponsor Service (轻量 HTTP, 可选, 企业部署)
+
+### Phase 5: 双机部署 + 故障自愈
+
+> 目标: 生产验证
+
+- envd 安装到本机 + RoseX 机器
+- WireGuard P2P 隧道验证 (跨 NAT)
+- 远程 Agent 管理: status, restart, logs, kill
+- 故障自愈: Agent 崩溃 → envd 自动重启 (≤60s, max 3 次) → 链上状态更新
+- 告警: 恢复失败 → Slack/TG 通知
+- agent-manager 集成: 本地 + 远程 Agent 统一管理
+
+### Phase 6: 生产就绪
+
+> 目标: 主网部署, 长期稳定运行
+
+- SUI 合约部署到 Mainnet
+- envd 二进制分发 (GitHub Releases, 多架构)
+- 安装脚本: `curl -sSL install.sh | sh`
+- 监控 Dashboard: 节点状态, P2P 连通率, gas 消耗
+- 文档: 安装指南, 配置参考, 故障排查
