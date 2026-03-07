@@ -39,14 +39,20 @@ type HeartbeatConfig struct {
 }
 
 type SUIConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	RPC          string `yaml:"rpc"`
-	KeypairPath  string `yaml:"keypair_path"`
-	PackageID    string `yaml:"package_id"`
-	RegistryID   string `yaml:"registry_id"`
-	OrgID        string `yaml:"org_id"`
-	CertID       string `yaml:"cert_id"`
-	PollInterval string `yaml:"poll_interval"`
+	Enabled      bool          `yaml:"enabled"`
+	RPC          string        `yaml:"rpc"`
+	KeypairPath  string        `yaml:"keypair_path"`
+	PackageID    string        `yaml:"package_id"`
+	RegistryID   string        `yaml:"registry_id"`
+	OrgID        string        `yaml:"org_id"`
+	CertID       string        `yaml:"cert_id"`
+	PollInterval string        `yaml:"poll_interval"`
+	Sponsor      SponsorConfig `yaml:"sponsor"`
+}
+
+type SponsorConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	URL     string `yaml:"url"`
 }
 
 type WireGuardConfig struct {

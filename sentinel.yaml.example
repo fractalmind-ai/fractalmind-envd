@@ -28,6 +28,9 @@ sui:
   org_id: "0x..."                     # Organization object ID
   cert_id: "0x..."                    # AgentCertificate object ID
   poll_interval: 30s                  # How often to poll for new peer events
+  sponsor:
+    enabled: false
+    url: http://localhost:8081/sponsor # Gas Sponsor Service endpoint
 
 # WireGuard P2P data plane
 wireguard:

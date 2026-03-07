@@ -1,0 +1,13 @@
+# sponsor-service.yaml — Gas Sponsor Service configuration
+# The sponsor service pays gas fees on behalf of envd worker nodes.
+
+listen: :8081
+
+sui:
+  rpc: https://fullnode.testnet.sui.io:443
+  keypair_path: ~/.sui/sponsor.key              # Ed25519 keypair for the sponsor wallet
+  package_id: "0x74aef8ff3bb0da5d5626780e6c0e5f1f36308a40580e519920fdc9204e73d958"
+  sponsor_registry_id: "0x22db6a75b60b1f530e9779188c62c75a44340723d9d78e21f7e25ded29718511"
+
+# Max gas budget per sponsored transaction (MIST). 10000000 = 0.01 SUI
+max_gas_per_tx: 10000000

@@ -5,6 +5,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,6 +20,7 @@ import (
 type mockRPC struct {
 	moveCallFn    func(ctx context.Context, req models.MoveCallRequest) (models.TxnMetaData, error)
 	signExecFn    func(ctx context.Context, req models.SignAndExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error)
+	execFn        func(ctx context.Context, req models.SuiExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error)
 	queryEventsFn func(ctx context.Context, req models.SuiXQueryEventsRequest) (models.PaginatedEventsResponse, error)
 }
 
@@ -29,6 +34,13 @@ func (m *mockRPC) MoveCall(ctx context.Context, req models.MoveCallRequest) (mod
 func (m *mockRPC) SignAndExecuteTransactionBlock(ctx context.Context, req models.SignAndExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error) {
 	if m.signExecFn != nil {
 		return m.signExecFn(ctx, req)
+	}
+	return models.SuiTransactionBlockResponse{}, nil
+}
+
+func (m *mockRPC) SuiExecuteTransactionBlock(ctx context.Context, req models.SuiExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error) {
+	if m.execFn != nil {
+		return m.execFn(ctx, req)
 	}
 	return models.SuiTransactionBlockResponse{}, nil
 }
@@ -157,11 +169,11 @@ func TestQueryPeers(t *testing.T) {
 					Data: []models.SuiEventResponse{
 						{
 							ParsedJson: map[string]interface{}{
-								"peer":              peerAddr,
-								"org_id":            "0xorg",
-								"wireguard_pubkey":  hex.EncodeToString(wgKey),
-								"endpoints":         []interface{}{"1.2.3.4:51820"},
-								"hostname":          "peer-host",
+								"peer":             peerAddr,
+								"org_id":           "0xorg",
+								"wireguard_pubkey": hex.EncodeToString(wgKey),
+								"endpoints":        []interface{}{"1.2.3.4:51820"},
+								"hostname":         "peer-host",
 							},
 						},
 					},
@@ -229,6 +241,139 @@ func TestApplyPeerDeregistered(t *testing.T) {
 	}
 	if _, ok := peers["0xpeer2"]; !ok {
 		t.Error("peer2 should still exist")
+	}
+}
+
+func TestExecuteViaSponsorship(t *testing.T) {
+	kp := testKeypair(t)
+
+	// Mock sponsor service
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+
+		var req SponsorRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+
+		if req.Module != "peer" || req.Function != "go_offline" {
+			t.Errorf("expected peer.go_offline, got %s.%s", req.Module, req.Function)
+		}
+
+		if req.Sender != kp.Address() {
+			t.Errorf("expected sender %s, got %s", kp.Address(), req.Sender)
+		}
+
+		// Return mock sponsored TX
+		resp := SponsorResponse{
+			TxBytes:          "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			SponsorSignature: "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	var execCalled bool
+	mock := &mockRPC{
+		execFn: func(_ context.Context, req models.SuiExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error) {
+			execCalled = true
+			if len(req.Signature) != 2 {
+				t.Errorf("expected 2 signatures, got %d", len(req.Signature))
+			}
+			return models.SuiTransactionBlockResponse{}, nil
+		},
+	}
+
+	client := newClientWithRPC(mock, kp, "0xpkg", "0xreg", "0xorg", "0xcert")
+	client.sponsor = NewSponsorClient(srv.URL)
+
+	err := client.GoOffline(context.Background())
+	if err != nil {
+		t.Fatalf("GoOffline via sponsor: %v", err)
+	}
+
+	if !execCalled {
+		t.Error("SuiExecuteTransactionBlock should have been called")
+	}
+}
+
+func TestSponsorClientError(t *testing.T) {
+	// Mock sponsor service that returns an error
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(SponsorErrorResponse{Error: "package not whitelisted"})
+	}))
+	defer srv.Close()
+
+	sc := NewSponsorClient(srv.URL)
+
+	_, err := sc.RequestSponsorship(context.Background(), SponsorRequest{
+		Sender:    "0xtest",
+		PackageID: "0xbad",
+		Module:    "peer",
+		Function:  "register_peer",
+	})
+
+	if err == nil {
+		t.Fatal("expected error from sponsor service")
+	}
+	if !hasPrefix(err.Error(), "sponsor service: package not whitelisted") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestDirectVsSponsoredRouting(t *testing.T) {
+	kp := testKeypair(t)
+
+	// Without sponsor — should use direct path
+	var directCalled bool
+	mock := &mockRPC{
+		moveCallFn: func(_ context.Context, req models.MoveCallRequest) (models.TxnMetaData, error) {
+			directCalled = true
+			return models.TxnMetaData{}, nil
+		},
+	}
+	client := newClientWithRPC(mock, kp, "0xpkg", "0xreg", "0xorg", "0xcert")
+
+	if err := client.GoOffline(context.Background()); err != nil {
+		t.Fatalf("direct GoOffline: %v", err)
+	}
+	if !directCalled {
+		t.Error("should use direct path when sponsor is nil")
+	}
+
+	// With sponsor — should use sponsor path
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := SponsorResponse{
+			TxBytes:          "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			SponsorSignature: "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	var sponsoredExecCalled bool
+	mock2 := &mockRPC{
+		moveCallFn: func(_ context.Context, req models.MoveCallRequest) (models.TxnMetaData, error) {
+			t.Error("MoveCall should NOT be called in sponsored path")
+			return models.TxnMetaData{}, fmt.Errorf("should not be called")
+		},
+		execFn: func(_ context.Context, req models.SuiExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error) {
+			sponsoredExecCalled = true
+			return models.SuiTransactionBlockResponse{}, nil
+		},
+	}
+	client2 := newClientWithRPC(mock2, kp, "0xpkg", "0xreg", "0xorg", "0xcert")
+	client2.sponsor = NewSponsorClient(srv.URL)
+
+	if err := client2.GoOffline(context.Background()); err != nil {
+		t.Fatalf("sponsored GoOffline: %v", err)
+	}
+	if !sponsoredExecCalled {
+		t.Error("should use sponsored path when sponsor is set")
 	}
 }
 
