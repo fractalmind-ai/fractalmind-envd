@@ -12,6 +12,7 @@ node_modules/
 /bin/
 /dist/
 gateway/dist/
+contracts/envd/build/
 
 # Test
 *.test
