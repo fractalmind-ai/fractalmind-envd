@@ -12,6 +12,9 @@ type Config struct {
 	Identity  IdentityConfig  `yaml:"identity"`
 	Agents    AgentsConfig    `yaml:"agents"`
 	Heartbeat HeartbeatConfig `yaml:"heartbeat"`
+	SUI       SUIConfig       `yaml:"sui"`
+	WireGuard WireGuardConfig `yaml:"wireguard"`
+	STUN      STUNConfig      `yaml:"stun"`
 }
 
 type GatewayConfig struct {
@@ -35,6 +38,30 @@ type HeartbeatConfig struct {
 	Interval string `yaml:"interval"`
 }
 
+type SUIConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	RPC          string `yaml:"rpc"`
+	KeypairPath  string `yaml:"keypair_path"`
+	PackageID    string `yaml:"package_id"`
+	RegistryID   string `yaml:"registry_id"`
+	OrgID        string `yaml:"org_id"`
+	CertID       string `yaml:"cert_id"`
+	PollInterval string `yaml:"poll_interval"`
+}
+
+type WireGuardConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	InterfaceName string `yaml:"interface_name"`
+	ListenPort    int    `yaml:"listen_port"`
+	KeypairPath   string `yaml:"keypair_path"`
+	Address       string `yaml:"address"`
+}
+
+type STUNConfig struct {
+	Enabled bool     `yaml:"enabled"`
+	Servers []string `yaml:"servers"`
+}
+
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() *Config {
 	hostname, _ := os.Hostname()
@@ -55,6 +82,25 @@ func DefaultConfig() *Config {
 		},
 		Heartbeat: HeartbeatConfig{
 			Interval: "30s",
+		},
+		SUI: SUIConfig{
+			Enabled:      false,
+			RPC:          "https://fullnode.testnet.sui.io:443",
+			KeypairPath:  "~/.sui/envd.key",
+			PollInterval: "30s",
+		},
+		WireGuard: WireGuardConfig{
+			Enabled:       false,
+			InterfaceName: "wg0",
+			ListenPort:    51820,
+			KeypairPath:   "~/.wireguard/envd.key",
+		},
+		STUN: STUNConfig{
+			Enabled: false,
+			Servers: []string{
+				"stun:stun.l.google.com:19302",
+				"stun:stun1.l.google.com:19302",
+			},
 		},
 	}
 }
