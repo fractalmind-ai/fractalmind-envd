@@ -1,0 +1,19 @@
+# sentinel.yaml.example — fractalmind-envd configuration
+# Copy to sentinel.yaml and edit for your environment.
+
+gateway:
+  url: ws://localhost:8080/ws
+  reconnect_interval: 5s
+
+identity:
+  host_id: ""          # auto-generated if empty
+  hostname: ""         # defaults to os.Hostname()
+
+agents:
+  scan_method: tmux    # tmux | systemd | docker
+  scan_interval: 10s
+  auto_restart: true
+  max_restart_attempts: 3
+
+heartbeat:
+  interval: 30s

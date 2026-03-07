@@ -1,0 +1,29 @@
+# Binaries
+/envd
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Build
+/bin/
+/dist/
+
+# Test
+*.test
+*.out
+coverage.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (local)
+sentinel.yaml
+*.local.yaml
