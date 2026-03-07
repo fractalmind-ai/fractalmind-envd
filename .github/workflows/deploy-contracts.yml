@@ -171,7 +171,11 @@ jobs:
           set -euo pipefail
           cd contracts/envd
 
-          # Update the local dependency path to point to the checked-out protocol
+          # In GitHub Actions workspace layout:
+          # /work/fractalmind-envd/fractalmind-envd/contracts/envd/ (we are here)
+          # /work/fractalmind-envd/fractalmind-envd/fractalmind-protocol/contracts/protocol/ (dependency)
+          # So relative path from contracts/envd/ is ../../fractalmind-protocol/contracts/protocol
+
           cat > Move.toml <<'TOML'
           [package]
           name = "fractalmind_envd"
@@ -184,7 +188,7 @@ jobs:
           rev = "framework/testnet"
 
           [dependencies.fractalmind_protocol]
-          local = "../../../../fractalmind-protocol/contracts/protocol"
+          local = "../../fractalmind-protocol/contracts/protocol"
 
           [addresses]
           fractalmind_envd = "0x0"
@@ -195,6 +199,8 @@ jobs:
 
           echo "=== Move.toml ==="
           cat Move.toml
+          echo "=== Verifying dependency path ==="
+          ls -la ../../fractalmind-protocol/contracts/protocol/ || echo "WARNING: dependency path not found"
           echo "================="
 
       # ============================================
