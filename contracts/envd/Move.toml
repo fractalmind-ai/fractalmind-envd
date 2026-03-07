@@ -1,0 +1,16 @@
+[package]
+name = "fractalmind_envd"
+version = "0.0.1"
+edition = "2024.beta"
+
+[dependencies.Sui]
+git = "https://github.com/MystenLabs/sui.git"
+subdir = "crates/sui-framework/packages/sui-framework"
+rev = "framework/testnet"
+
+[dependencies.fractalmind_protocol]
+local = "../../../fractalmind-protocol/contracts/protocol"
+addr_subst = { "fractalmind_protocol" = "0x685d6fb6ed8b0e679bb467ea73111819ec6ff68b1466d24ca26b400095dcdf24" }
+
+[addresses]
+fractalmind_envd = "0x0"
