@@ -39,7 +39,29 @@
 | **优势** | 画面流畅（4K 60fps），跨平台，P2P 优先 |
 | **劣势** | 面向 GUI 桌面控制，非为 headless 服务器设计 |
 
-### 3. Tailscale
+### 3. TeamViewer
+
+**产品**: 远程桌面/远程支持行业标杆，全球 60 万+ 付费客户。
+
+| 维度 | 详情 |
+|------|------|
+| **架构** | 中心化 Master Server 做连接撮合，P2P (~70%) + Relay (~30%) 数据传输 |
+| **穿透方式** | 专有 UDP hole punching (port 5938)，fallback TCP/443、TCP/80。P2P 成功率 ~70%，失败时通过 TeamViewer Router Network 中转 |
+| **认证** | TeamViewer ID + 密码，由 Master Server 验证 |
+| **信任根** | TeamViewer Master Server。控制连接建立/断开、ID 分配、密码验证 |
+| **加密** | RSA 4096 密钥交换 + AES-256 会话加密 (E2E，Relay 无法解密) |
+| **协议** | 专有协议 (port 5938 TCP/UDP)，封装远程桌面画面 + 键鼠 + 文件传输 |
+| **费用** | 免费个人版；Remote Access $24.90/月；Business $50.90/月；Premium $112.90/月；Corporate $229.90/月 (均年付) |
+| **优势** | P2P 成功率高 (~70%)、E2E 加密、全平台支持、企业级功能完善 |
+| **劣势** | 专有协议不可审计、Master Server 是单点信任、商业授权贵、面向 GUI 非 CLI |
+
+**关键架构细节**:
+- Master Server 角色: 连接撮合 (brokering) + ID 认证 + NAT 信息交换
+- P2P 流程: 双方先连 Master Server (HTTPS/SSL) → PIN/Code 验证 → Master Server 交换双方公网 IP:port → UDP hole punching 建立直连
+- Relay 流程: UDP hole punching 失败 → 通过 TeamViewer Router Network 中转 (TCP/HTTPS tunneling)
+- 即使经过 Relay，数据也是 E2E 加密的，TeamViewer 无法解密
+
+### 4. Tailscale
 
 **产品**: 基于 WireGuard 的 Mesh VPN，零配置组网。
 
@@ -56,20 +78,24 @@
 
 ## 架构对比矩阵
 
-| 特征 | 花生壳 | ToDesk | Tailscale | **fractalmind-envd** |
-|------|--------|--------|-----------|---------------------|
-| **信任根** | Oray 服务器 | ToDesk 服务器 | Tailscale Coord | **SUI 区块链** |
-| **控制平面** | 中心化 | 中心化 | 中心化 | **链上 (去中心化)** |
-| **数据平面** | 中心转发 | P2P/relay | **WireGuard P2P** | **WireGuard P2P** |
-| **身份认证** | 账号密码 | 设备码 | SSO + WG keys | **SUI keypair** |
-| **Peer 发现** | Oray 服务器 | ToDesk 服务器 | Coord Server | **SUI Events** |
-| **Relay** | Oray 转发 | ToDesk relay | DERP (无状态) | **TURN (无状态, 可选)** |
-| **审计性** | 不透明 | 不透明 | ACL 日志 | **链上全记录** |
-| **治理** | 厂商决策 | 厂商决策 | ACL 规则 | **DAO 链上投票** |
-| **单点故障** | Oray 宕机 | ToDesk 宕机 | Coord 宕机 | **无 (链不停)** |
+| 特征 | 花生壳 | ToDesk | TeamViewer | Tailscale | **fractalmind-envd** |
+|------|--------|--------|------------|-----------|---------------------|
+| **信任根** | Oray 服务器 | ToDesk 服务器 | TV Master Server | Tailscale Coord | **SUI 区块链** |
+| **控制平面** | 中心化 | 中心化 | 中心化 | 中心化 | **链上 (去中心化)** |
+| **数据平面** | 中心转发 | P2P/relay | **P2P 70%** / relay 30% | **WireGuard P2P** | **WireGuard P2P** |
+| **P2P 成功率** | 低 (付费) | ~60-80% | **~70%** (专有 UDP) | **~95%** (WireGuard) | **~95%** (WireGuard) |
+| **身份认证** | 账号密码 | 设备码 | ID+密码 | SSO + WG keys | **SUI keypair** |
+| **Peer 发现** | Oray 服务器 | ToDesk 服务器 | Master Server | Coord Server | **SUI Events** |
+| **Relay** | Oray 转发 | ToDesk relay | TV Router Network | DERP (无状态) | **TURN (无状态, 可选)** |
+| **加密** | TLS | TLS | **RSA4096 + AES256 E2E** | **WireGuard (ChaCha20)** | **WireGuard (ChaCha20)** |
+| **审计性** | 不透明 | 不透明 | 不透明 | ACL 日志 | **链上全记录** |
+| **治理** | 厂商决策 | 厂商决策 | 厂商决策 | ACL 规则 | **DAO 链上投票** |
+| **单点故障** | Oray 宕机 | ToDesk 宕机 | TV Master 宕机 | Coord 宕机 | **无 (链不停)** |
+| **月费 (团队)** | ¥6-168/年 | ¥8-25/月 | **$50.90-229.90/月** | $6/user/月 | **~$0.14/月** |
 
 **吸收的竞品优势**:
 - Tailscale → WireGuard P2P 数据平面 + DERP relay 模式
+- TeamViewer → P2P 优先 + Relay 兜底架构 + E2E 加密 (即使过 Relay)
 - ToDesk → P2P 优先, relay 兜底
 - 花生壳 → STUN/TURN NAT 穿透
 
@@ -535,10 +561,296 @@ fractalmind_protocol = "0x685d6fb6ed8b0e679bb467ea73111819ec6ff68b1466d24ca26b40
 
 ---
 
+## Gas 成本分析
+
+### SUI Gas 模型
+
+SUI Gas 费用 = **RGP × CU + SP × SU - SR**
+
+| 术语 | 含义 |
+|------|------|
+| RGP | Reference Gas Price (当前主网 ~551 MIST) |
+| CU | Computation Units (执行消耗) |
+| SP × SU | 存储价格 × 存储单元 (新建对象/扩大 Table) |
+| SR | Storage Rebate (删除对象时退还) |
+
+### 各操作 Gas 估算
+
+| 操作 | CU 估计 | 存储 | 总 Gas (SUI) | 说明 |
+|------|---------|------|-------------|------|
+| `register_peer` | ~2,000 | ~1KB (new Table entry) | **~0.0017** | 首次注册, 含存储费 |
+| `update_endpoints` | ~1,500 | 0 (修改现有) | **~0.0011** | IP 漂移更新, 无新存储 |
+| `go_offline` | ~1,000 | 0 | **~0.0008** | 状态变更 |
+| `go_online` | ~1,500 | 0 | **~0.0011** | 状态 + endpoint 更新 |
+| `deregister_peer` | ~1,000 | 负 (删除) | **~0.0003** | 删除退还存储费 |
+
+### 月度成本估算
+
+**场景: 2 节点 (本机 + RoseX)**
+
+| 操作 | 频率 | 次/月 | 单价 (SUI) | 月费 (SUI) |
+|------|------|-------|-----------|-----------|
+| register_peer | 启动时 | 30 (日重启) | 0.0017 | 0.051 |
+| update_endpoints | IP 变化 | 10 | 0.0011 | 0.011 |
+| go_offline/online | 每次重启 | 60 | 0.001 | 0.060 |
+| **合计** | | | | **~0.122 SUI** |
+
+> 按 SUI ≈ $1.15 计算: **~$0.14/月** (2 节点)
+
+**场景: 100 节点 (中型团队)**
+
+| 操作 | 频率 | 次/月 | 月费 (SUI) |
+|------|------|-------|-----------|
+| register_peer | 启动时 | 1,500 | 2.55 |
+| update_endpoints | IP 变化 | 500 | 0.55 |
+| go_offline/online | 重启 | 3,000 | 3.00 |
+| **合计** | | | **~6.10 SUI ≈ $7.13/月** |
+
+### 心跳不上链的验证
+
+如果心跳 (30s 间隔) 也上链:
+
+| 节点数 | 心跳/月 | Gas (SUI) | 月费 |
+|--------|---------|-----------|------|
+| 2 | 172,800 | ~138 | **~$159** |
+| 100 | 8,640,000 | ~6,912 | **~$7,948** |
+
+> ✅ 正确决策: 心跳通过 WireGuard P2P 直传, 仅注册/endpoint 变更/上下线上链。
+
+### 竞品价格对比
+
+| 产品 | 2 节点月费 | 100 节点月费 | 模式 |
+|------|-----------|-------------|------|
+| Tailscale Team | $12 | $600 | 中心化 SaaS |
+| TeamViewer Business | $101.80 | N/A (per-user) | 中心化 SaaS |
+| ToDesk 专业版 | ¥50 (~$7) | N/A | 中心化 SaaS |
+| **fractalmind-envd** | **$0.14** | **$7.13** | **去中心化链上** |
+
+> fractalmind-envd 比 Tailscale Team 便宜 **~85x**, 同时实现去中心化。
+
+---
+
+## Gas 代付机制 (Sponsored Transactions)
+
+### 需求
+
+管理员 (org admin) 统一为所有 envd 节点代付 Gas, 让 worker 节点无需持有 SUI token。
+
+### SUI Sponsored Transaction 原理
+
+SUI 原生支持 **Sponsored Transaction** (SIP-15):
+
+```
+普通交易:    sender 签名 + sender 付 gas
+代付交易:    sender 签名 + sponsor 签名 + sponsor 付 gas
+```
+
+流程:
+1. **Worker** 构造交易 (TransactionData), 但不设 gas budget/coin
+2. **Worker** 签名交易 → 发给 **Sponsor Service**
+3. **Sponsor** 验证交易合法性 → 添加 gas budget + gas coin → 签名
+4. **双签名交易** 提交到 SUI 网络 → gas 从 sponsor 扣除
+
+> 关键: Worker 无需持有任何 SUI token, 但仍然用自己的 keypair 签名 (身份不变)。
+
+### 架构设计
+
+```
+envd (worker node)                    Gas Sponsor Service (admin 运营)
+├── 构造 TX (register_peer等)         ├── 验证 TX 白名单 (仅允许 envd 合约调用)
+├── 用自己的 keypair 签名              ├── 检查 sender 是否在 org 内
+├── 发送 partial-signed TX ─────────► ├── 添加 gas coin + budget
+│   (via HTTPS)                       ├── 用 sponsor keypair 签名
+│                                     ├── 提交 dual-signed TX 到 SUI
+└── 收到 TX digest 确认 ◄──────────── └── 返回结果
+```
+
+### 合约扩展: `sponsor.move`
+
+```move
+/// fractalmind-envd — Gas Sponsor Registry
+/// 管理 org 级别的 Gas 代付策略。
+module fractalmind_envd::sponsor {
+    use sui::object::{Self, ID, UID};
+    use sui::tx_context::{Self, TxContext};
+    use sui::transfer;
+    use sui::table::{Self, Table};
+    use sui::event;
+    use sui::coin::{Self, Coin};
+    use sui::sui::SUI;
+
+    use fractalmind_protocol::organization::Organization;
+    use fractalmind_protocol::organization;
+
+    // ===== Error Codes (8100) =====
+
+    const E_NOT_ADMIN: u64 = 8101;
+    const E_SPONSOR_EXISTS: u64 = 8102;
+    const E_SPONSOR_NOT_FOUND: u64 = 8103;
+    const E_INSUFFICIENT_BALANCE: u64 = 8104;
+    const E_DAILY_LIMIT_EXCEEDED: u64 = 8105;
+
+    // ===== Structs =====
+
+    /// 组织级 Gas 代付配置 (shared object)
+    public struct SponsorRegistry has key {
+        id: UID,
+        /// org_id → SponsorConfig
+        sponsors: Table<ID, SponsorConfig>,
+    }
+
+    /// 单个组织的代付策略
+    public struct SponsorConfig has store {
+        /// 代付管理员 (通常是 org admin)
+        admin: address,
+        /// 是否启用
+        enabled: bool,
+        /// 每笔交易最大 gas budget (MIST)
+        max_gas_per_tx: u64,
+        /// 每日 gas 上限 (MIST)
+        daily_gas_limit: u64,
+        /// 当日已用 gas (MIST), 每日重置
+        daily_gas_used: u64,
+        /// 上次重置日期 (epoch)
+        last_reset_epoch: u64,
+    }
+
+    // ===== Events =====
+
+    public struct SponsorEnabled has copy, drop {
+        org_id: ID,
+        admin: address,
+        max_gas_per_tx: u64,
+        daily_gas_limit: u64,
+    }
+
+    public struct SponsorDisabled has copy, drop {
+        org_id: ID,
+    }
+
+    // ===== Init =====
+
+    fun init(ctx: &mut TxContext) {
+        let registry = SponsorRegistry {
+            id: object::new(ctx),
+            sponsors: table::new(ctx),
+        };
+        transfer::share_object(registry);
+    }
+
+    // ===== Public Functions =====
+
+    /// Org admin 启用 Gas 代付
+    public entry fun enable_sponsor(
+        registry: &mut SponsorRegistry,
+        org: &Organization,
+        max_gas_per_tx: u64,
+        daily_gas_limit: u64,
+        ctx: &mut TxContext,
+    ) {
+        let sender = tx_context::sender(ctx);
+        let org_id = organization::org_id(org);
+
+        // 仅 org admin 可启用
+        assert!(organization::admin(org) == sender, E_NOT_ADMIN);
+        assert!(!table::contains(&registry.sponsors, org_id), E_SPONSOR_EXISTS);
+
+        let config = SponsorConfig {
+            admin: sender,
+            enabled: true,
+            max_gas_per_tx,
+            daily_gas_limit,
+            daily_gas_used: 0,
+            last_reset_epoch: tx_context::epoch(ctx),
+        };
+
+        table::add(&mut registry.sponsors, org_id, config);
+
+        event::emit(SponsorEnabled {
+            org_id,
+            admin: sender,
+            max_gas_per_tx,
+            daily_gas_limit,
+        });
+    }
+
+    /// 查询 org 的代付配置
+    public fun get_sponsor(registry: &SponsorRegistry, org_id: ID): &SponsorConfig {
+        table::borrow(&registry.sponsors, org_id)
+    }
+
+    public fun is_enabled(config: &SponsorConfig): bool { config.enabled }
+    public fun sponsor_admin(config: &SponsorConfig): address { config.admin }
+}
+```
+
+> **注意**: 链上合约仅管理代付**策略** (限额、白名单)。实际的 Gas 代付通过 SUI 原生 Sponsored Transaction 机制在**链下**完成, 不需要合约持有 SUI coin。
+
+### Gas Sponsor Service (链下)
+
+轻量 HTTP 服务, admin 部署:
+
+```
+POST /sponsor
+Body: { partial_signed_tx: base64 }
+
+验证流程:
+1. 解码 TransactionData
+2. 检查: 目标合约 == fractalmind_envd (白名单)
+3. 检查: sender 在 org 内 (查链上 Organization)
+4. 检查: 链上 SponsorConfig.enabled == true
+5. 检查: gas budget ≤ max_gas_per_tx
+6. 检查: daily_gas_used + budget ≤ daily_gas_limit
+7. 添加 sponsor gas coin + budget
+8. Sponsor keypair 签名
+9. 提交 dual-signed TX 到 SUI
+10. 返回 { tx_digest }
+```
+
+### envd 集成
+
+`sentinel.yaml` 增加 sponsor 配置:
+
+```yaml
+sui:
+  rpc: https://fullnode.testnet.sui.io:443
+  keypair_path: ~/.sui/envd.key
+  org_id: "0x..."
+  sponsor:
+    enabled: true
+    url: https://sponsor.fractalmind.ai/sponsor  # Gas Sponsor Service
+    # 如果 enabled=false, envd 自己付 gas (需持有 SUI)
+```
+
+envd 交易发送流程:
+
+```
+if sponsor.enabled:
+    1. 构造 TX (不含 gas)
+    2. 用自己 keypair 签名
+    3. POST /sponsor → 获取 tx_digest
+else:
+    1. 构造 TX (含 gas coin)
+    2. 签名 + 提交
+```
+
+### 成本对比
+
+| 模式 | Worker 需持有 SUI | Admin 管理 | 适用场景 |
+|------|-------------------|-----------|---------|
+| **自付 (默认)** | 是 (~0.1 SUI/月) | 无 | 少量节点, 技术用户 |
+| **代付 (sponsor)** | 否 | 统一充值 + 限额 | 企业部署, 多节点 |
+
+> 企业场景: Admin 充值 10 SUI 到 sponsor wallet → 够 100 节点运行 ~1.5 个月。
+
+---
+
 ## 行动项
 
 1. ✅ 竞品调研 + 架构设计完成
-2. → 部署 `fractalmind_envd::peer` 合约到 SUI Testnet
-3. → envd 集成 WireGuard (Go `wireguard-go` 或 `wgctrl`)
-4. → envd 集成 SUI Client (读 events, 写 transactions)
-5. → 本机 + RoseX 双机验证
+2. ✅ Gas 成本评估 + 代付机制设计完成
+3. → 部署 `fractalmind_envd::peer` + `fractalmind_envd::sponsor` 合约到 SUI Testnet
+4. → Gas Sponsor Service 开发 (轻量 HTTP, 可选)
+5. → envd 集成 WireGuard (Go `wireguard-go` 或 `wgctrl`)
+6. → envd 集成 SUI Client (读 events, 写 transactions, 支持 sponsored TX)
+7. → 本机 + RoseX 双机验证
