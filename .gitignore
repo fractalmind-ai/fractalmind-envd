@@ -5,9 +5,13 @@
 *.so
 *.dylib
 
-# Build
+# Dependencies
+node_modules/
+
+# Build output
 /bin/
 /dist/
+gateway/dist/
 
 # Test
 *.test
