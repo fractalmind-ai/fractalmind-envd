@@ -167,16 +167,27 @@ jobs:
       # Prepare Dependencies
       # ============================================
       - name: Setup Move.toml for CI
+        env:
+          PROTOCOL_PACKAGE_ID: '0x685d6fb6ed8b0e679bb467ea73111819ec6ff68b1466d24ca26b400095dcdf24'
         run: |
           set -euo pipefail
+
+          # === 1. Patch protocol Move.toml to mark as published ===
+          PROTOCOL_TOML="fractalmind-protocol/contracts/protocol/Move.toml"
+          echo "=== Original Protocol Move.toml ==="
+          cat "$PROTOCOL_TOML"
+
+          # Add published-at field and fix address to match on-chain package
+          sed -i "s|^edition = \"2024.beta\"|edition = \"2024.beta\"\npublished-at = \"${PROTOCOL_PACKAGE_ID}\"|" "$PROTOCOL_TOML"
+          sed -i "s|^fractalmind_protocol = \"0x0\"|fractalmind_protocol = \"${PROTOCOL_PACKAGE_ID}\"|" "$PROTOCOL_TOML"
+
+          echo "=== Patched Protocol Move.toml ==="
+          cat "$PROTOCOL_TOML"
+
+          # === 2. Write envd Move.toml with correct dependency ===
           cd contracts/envd
 
-          # In GitHub Actions workspace layout:
-          # /work/fractalmind-envd/fractalmind-envd/contracts/envd/ (we are here)
-          # /work/fractalmind-envd/fractalmind-envd/fractalmind-protocol/contracts/protocol/ (dependency)
-          # So relative path from contracts/envd/ is ../../fractalmind-protocol/contracts/protocol
-
-          cat > Move.toml <<'TOML'
+          cat > Move.toml <<TOML
           [package]
           name = "fractalmind_envd"
           version = "0.0.1"
@@ -197,7 +208,7 @@ jobs:
           # Remove leading whitespace from heredoc
           sed -i 's/^          //' Move.toml
 
-          echo "=== Move.toml ==="
+          echo "=== envd Move.toml ==="
           cat Move.toml
           echo "=== Verifying dependency path ==="
           ls -la ../../fractalmind-protocol/contracts/protocol/ || echo "WARNING: dependency path not found"
@@ -227,7 +238,7 @@ jobs:
           echo "=========================="
 
           set +e
-          DEPLOY_OUTPUT=$(sui client publish --gas-budget "$GAS_BUDGET" --silence-warnings --skip-dependency-verification --json 2>&1)
+          DEPLOY_OUTPUT=$(sui client publish --gas-budget "$GAS_BUDGET" --silence-warnings --json 2>&1)
           EXIT_CODE=$?
           set -e
 
