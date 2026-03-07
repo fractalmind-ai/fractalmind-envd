@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -13,7 +14,11 @@ import (
 	"github.com/fractalmind-ai/fractalmind-envd/internal/agent"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/config"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/heartbeat"
+	"github.com/fractalmind-ai/fractalmind-envd/internal/stun"
+	"github.com/fractalmind-ai/fractalmind-envd/internal/sui"
+	"github.com/fractalmind-ai/fractalmind-envd/internal/wg"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/ws"
+	wgctrl "golang.zx2c4.com/wireguard/wgctrl"
 )
 
 var (
@@ -63,6 +68,78 @@ func main() {
 	restartCounts := make(map[string]int)
 	var lastAgents []agent.Agent
 
+	// --- SUI + WireGuard integration (gated behind config flags) ---
+	var suiClient *sui.Client
+	var wgManager *wg.Manager
+	var suiPollTicker *time.Ticker
+	var eventCursor string
+
+	if cfg.SUI.Enabled && cfg.WireGuard.Enabled {
+		log.Printf("SUI + WireGuard integration enabled")
+
+		// 1. Init WireGuard manager
+		wgClient, err := wgctrl.New()
+		if err != nil {
+			log.Fatalf("failed to create wgctrl client: %v", err)
+		}
+
+		wgManager, err = wg.NewManager(cfg.WireGuard, wgClient)
+		if err != nil {
+			log.Fatalf("failed to create wg manager: %v", err)
+		}
+
+		if err := wgManager.Setup(); err != nil {
+			log.Fatalf("failed to setup wg interface: %v", err)
+		}
+
+		// 2. STUN endpoint discovery
+		var endpoints []string
+		if cfg.STUN.Enabled {
+			publicEndpoint, err := stun.DiscoverEndpoint(cfg.STUN.Servers)
+			if err != nil {
+				log.Printf("[stun] endpoint discovery failed: %v", err)
+			} else {
+				endpoints = append(endpoints, publicEndpoint)
+			}
+		}
+		// Add local listen address as fallback endpoint
+		if cfg.WireGuard.Address != "" {
+			endpoints = append(endpoints, cfg.WireGuard.Address)
+		}
+		if len(endpoints) == 0 {
+			endpoints = append(endpoints, fmt.Sprintf("0.0.0.0:%d", cfg.WireGuard.ListenPort))
+		}
+
+		// 3. Init SUI client
+		suiClient, err = sui.NewClient(cfg.SUI)
+		if err != nil {
+			log.Fatalf("failed to create sui client: %v", err)
+		}
+
+		// 4. Register peer on-chain
+		ctx := context.Background()
+		if err := suiClient.RegisterPeer(ctx, wgManager.PublicKey(), endpoints, cfg.Identity.Hostname); err != nil {
+			log.Printf("[sui] peer registration failed: %v", err)
+		}
+
+		// 5. Query existing peers and sync WireGuard
+		peers, err := suiClient.QueryPeers(ctx)
+		if err != nil {
+			log.Printf("[sui] failed to query peers: %v", err)
+		} else if len(peers) > 0 {
+			if err := wgManager.SyncPeers(peers); err != nil {
+				log.Printf("[wg] failed to sync peers: %v", err)
+			}
+		}
+
+		// Start SUI event poll ticker
+		pollInterval, _ := time.ParseDuration(cfg.SUI.PollInterval)
+		if pollInterval == 0 {
+			pollInterval = 30 * time.Second
+		}
+		suiPollTicker = time.NewTicker(pollInterval)
+	}
+
 	// Handle commands from Gateway
 	wsClient.OnCommand(func(cmd ws.CommandPayload) {
 		log.Printf("[cmd] received: %s agent=%s", cmd.Command, cmd.AgentID)
@@ -91,6 +168,9 @@ func main() {
 	scanTicker := time.NewTicker(scanInterval)
 	defer heartbeatTicker.Stop()
 	defer scanTicker.Stop()
+	if suiPollTicker != nil {
+		defer suiPollTicker.Stop()
+	}
 
 	// Initial scan
 	if agents, err := scanner.Scan(); err == nil {
@@ -101,6 +181,14 @@ func main() {
 	// Signal handling
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	// Helper to get SUI poll channel (nil-safe)
+	suiPollCh := func() <-chan time.Time {
+		if suiPollTicker != nil {
+			return suiPollTicker.C
+		}
+		return nil
+	}
 
 	for {
 		select {
@@ -129,8 +217,38 @@ func main() {
 				log.Printf("[heartbeat] send failed: %v", err)
 			}
 
+		case <-suiPollCh():
+			// Poll SUI for new peer events
+			if suiClient != nil && wgManager != nil {
+				newPeers, newCursor, err := suiClient.PollNewEvents(context.Background(), eventCursor)
+				if err != nil {
+					log.Printf("[sui] event poll failed: %v", err)
+				} else {
+					eventCursor = newCursor
+					if len(newPeers) > 0 {
+						log.Printf("[sui] %d peer updates from poll", len(newPeers))
+						if err := wgManager.SyncPeers(newPeers); err != nil {
+							log.Printf("[wg] failed to sync peers: %v", err)
+						}
+					}
+				}
+			}
+
 		case sig := <-sigCh:
 			log.Printf("received signal %s, shutting down", sig)
+
+			// Graceful SUI + WireGuard shutdown
+			if suiClient != nil {
+				if err := suiClient.GoOffline(context.Background()); err != nil {
+					log.Printf("[sui] go offline failed: %v", err)
+				}
+			}
+			if wgManager != nil {
+				if err := wgManager.Close(); err != nil {
+					log.Printf("[wg] close failed: %v", err)
+				}
+			}
+
 			wsClient.Close()
 			os.Exit(0)
 		}

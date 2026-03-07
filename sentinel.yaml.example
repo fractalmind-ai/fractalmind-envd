@@ -17,3 +17,29 @@ agents:
 
 heartbeat:
   interval: 30s
+
+# SUI blockchain control plane (peer discovery, identity, ACL)
+sui:
+  enabled: false
+  rpc: https://fullnode.testnet.sui.io:443
+  keypair_path: ~/.sui/envd.key       # Ed25519 keypair (auto-generated if missing)
+  package_id: "0x..."                 # fractalmind_envd package on SUI
+  registry_id: "0x..."                # PeerRegistry shared object ID
+  org_id: "0x..."                     # Organization object ID
+  cert_id: "0x..."                    # AgentCertificate object ID
+  poll_interval: 30s                  # How often to poll for new peer events
+
+# WireGuard P2P data plane
+wireguard:
+  enabled: false
+  interface_name: wg0
+  listen_port: 51820
+  keypair_path: ~/.wireguard/envd.key # Curve25519 keypair (auto-generated if missing)
+  # address: 10.100.X.Y/32            # Auto-assigned from SUI address hash if empty
+
+# STUN NAT endpoint discovery
+stun:
+  enabled: false
+  servers:
+    - stun:stun.l.google.com:19302
+    - stun:stun1.l.google.com:19302
