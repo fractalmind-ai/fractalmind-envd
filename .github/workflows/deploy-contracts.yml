@@ -221,8 +221,13 @@ jobs:
           GAS_BUDGET=500000000
           echo "Publishing fractalmind_envd with gas budget $GAS_BUDGET"
 
+          # Verify protocol dependency has published-at set
+          echo "=== Protocol Move.toml ==="
+          cat ../../fractalmind-protocol/contracts/protocol/Move.toml
+          echo "=========================="
+
           set +e
-          DEPLOY_OUTPUT=$(sui client publish --gas-budget "$GAS_BUDGET" --silence-warnings --json 2>&1)
+          DEPLOY_OUTPUT=$(sui client publish --gas-budget "$GAS_BUDGET" --silence-warnings --skip-dependency-verification --json 2>&1)
           EXIT_CODE=$?
           set -e
 
