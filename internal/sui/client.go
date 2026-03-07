@@ -16,17 +16,19 @@ import (
 type RPCClient interface {
 	MoveCall(ctx context.Context, req models.MoveCallRequest) (models.TxnMetaData, error)
 	SignAndExecuteTransactionBlock(ctx context.Context, req models.SignAndExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error)
+	SuiExecuteTransactionBlock(ctx context.Context, req models.SuiExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error)
 	SuiXQueryEvents(ctx context.Context, req models.SuiXQueryEventsRequest) (models.PaginatedEventsResponse, error)
 }
 
 // Client is the SUI blockchain client for peer registry operations.
 type Client struct {
-	rpc        RPCClient
-	keypair    *Keypair
-	packageID  string
+	rpc       RPCClient
+	keypair   *Keypair
+	packageID string
 	registryID string
-	orgID      string
-	certID     string
+	orgID     string
+	certID    string
+	sponsor   *SponsorClient
 }
 
 // NewClient creates a SUI client from config.
@@ -40,14 +42,21 @@ func NewClient(cfg config.SUIConfig) (*Client, error) {
 
 	log.Printf("[sui] address=%s", kp.Address())
 
-	return &Client{
+	c := &Client{
 		rpc:        rpc,
 		keypair:    kp,
 		packageID:  cfg.PackageID,
 		registryID: cfg.RegistryID,
 		orgID:      cfg.OrgID,
 		certID:     cfg.CertID,
-	}, nil
+	}
+
+	if cfg.Sponsor.Enabled && cfg.Sponsor.URL != "" {
+		c.sponsor = NewSponsorClient(cfg.Sponsor.URL)
+		log.Printf("[sui] sponsor enabled: %s", cfg.Sponsor.URL)
+	}
+
+	return c, nil
 }
 
 // newClientWithRPC creates a client with a custom RPC (for testing).
@@ -224,7 +233,16 @@ func (c *Client) PollNewEvents(ctx context.Context, cursor string) ([]PeerInfo, 
 }
 
 // executeMoveCall builds, signs, and executes a Move function call.
+// If sponsor is enabled, routes through the Sponsor Service for gas sponsorship.
 func (c *Client) executeMoveCall(ctx context.Context, module, function string, args []interface{}) error {
+	if c.sponsor != nil {
+		return c.executeViaSponsorship(ctx, module, function, args)
+	}
+	return c.executeDirect(ctx, module, function, args)
+}
+
+// executeDirect builds, signs, and executes a TX directly (self-paying gas).
+func (c *Client) executeDirect(ctx context.Context, module, function string, args []interface{}) error {
 	txn, err := c.rpc.MoveCall(ctx, models.MoveCallRequest{
 		Signer:          c.keypair.Address(),
 		PackageObjectId: c.packageID,
@@ -251,6 +269,45 @@ func (c *Client) executeMoveCall(ctx context.Context, module, function string, a
 		return fmt.Errorf("execute tx: %w", err)
 	}
 
+	return nil
+}
+
+// executeViaSponsorship sends the move call intent to the Sponsor Service,
+// receives back (tx_bytes, sponsor_signature), co-signs with our key, and submits.
+func (c *Client) executeViaSponsorship(ctx context.Context, module, function string, args []interface{}) error {
+	req := SponsorRequest{
+		Sender:    c.keypair.Address(),
+		PackageID: c.packageID,
+		Module:    module,
+		Function:  function,
+		TypeArgs:  []interface{}{},
+		Args:      args,
+	}
+
+	resp, err := c.sponsor.RequestSponsorship(ctx, req)
+	if err != nil {
+		return fmt.Errorf("sponsor request: %w", err)
+	}
+
+	// Co-sign the tx_bytes with our keypair
+	txnMeta := models.TxnMetaData{TxBytes: resp.TxBytes}
+	signed := txnMeta.SignSerializedSigWith(c.keypair.Private)
+
+	// Submit with both signatures (sponsor first, then sender)
+	_, err = c.rpc.SuiExecuteTransactionBlock(ctx, models.SuiExecuteTransactionBlockRequest{
+		TxBytes:   resp.TxBytes,
+		Signature: []string{resp.SponsorSignature, signed.Signature},
+		Options: models.SuiTransactionBlockOptions{
+			ShowEffects: true,
+			ShowEvents:  true,
+		},
+		RequestType: "WaitForLocalExecution",
+	})
+	if err != nil {
+		return fmt.Errorf("execute sponsored tx: %w", err)
+	}
+
+	log.Printf("[sui] sponsored TX executed")
 	return nil
 }
 
