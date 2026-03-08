@@ -141,6 +141,35 @@ func (c *Client) GoOnline(ctx context.Context, endpoints []string) error {
 	return nil
 }
 
+// RegisterRelay registers this node as a relay on-chain with relay metadata.
+func (c *Client) RegisterRelay(ctx context.Context, relayAddr, region, isp string, capacity uint64) error {
+	err := c.executeMoveCall(ctx, "relay_info", "register_relay", []interface{}{
+		c.registryID,
+		relayAddr,
+		region,
+		isp,
+		fmt.Sprintf("%d", capacity),
+	})
+	if err != nil {
+		return fmt.Errorf("register relay: %w", err)
+	}
+	log.Printf("[sui] registered as relay on-chain (addr=%s, region=%s)", relayAddr, region)
+	return nil
+}
+
+// UpdateUptimeScore updates this relay's uptime score on-chain.
+func (c *Client) UpdateUptimeScore(ctx context.Context, score uint64) error {
+	err := c.executeMoveCall(ctx, "relay_info", "update_uptime_score", []interface{}{
+		c.registryID,
+		fmt.Sprintf("%d", score),
+	})
+	if err != nil {
+		return fmt.Errorf("update uptime score: %w", err)
+	}
+	log.Printf("[sui] uptime score updated to %d", score)
+	return nil
+}
+
 // QueryPeers fetches all PeerRegistered events and overlays status/endpoint
 // updates to build the current peer state.
 func (c *Client) QueryPeers(ctx context.Context) ([]PeerInfo, error) {
@@ -162,6 +191,12 @@ func (c *Client) QueryPeers(ctx context.Context) ([]PeerInfo, error) {
 	statusType := fmt.Sprintf("%s::peer::PeerStatusChanged", c.packageID)
 	if err := c.fetchAllEvents(ctx, statusType, peers, applyPeerStatusChanged); err != nil {
 		return nil, fmt.Errorf("query PeerStatusChanged events: %w", err)
+	}
+
+	// Overlay RelayRegistered (relay_info module)
+	relayRegType := fmt.Sprintf("%s::relay_info::RelayRegistered", c.packageID)
+	if err := c.fetchAllEvents(ctx, relayRegType, peers, applyRelayRegistered); err != nil {
+		return nil, fmt.Errorf("query RelayRegistered events: %w", err)
 	}
 
 	// Remove deregistered peers
@@ -193,6 +228,7 @@ func (c *Client) PollNewEvents(ctx context.Context, cursor string) ([]PeerInfo, 
 		fmt.Sprintf("%s::peer::PeerEndpointUpdated", c.packageID),
 		fmt.Sprintf("%s::peer::PeerStatusChanged", c.packageID),
 		fmt.Sprintf("%s::peer::PeerDeregistered", c.packageID),
+		fmt.Sprintf("%s::relay_info::RelayRegistered", c.packageID),
 	}
 
 	appliers := []func(map[string]interface{}, map[string]*PeerInfo){
@@ -200,6 +236,7 @@ func (c *Client) PollNewEvents(ctx context.Context, cursor string) ([]PeerInfo, 
 		applyPeerEndpointUpdated,
 		applyPeerStatusChanged,
 		applyPeerDeregistered,
+		applyRelayRegistered,
 	}
 
 	for i, eventType := range eventTypes {
@@ -422,4 +459,31 @@ func applyPeerDeregistered(data map[string]interface{}, peers map[string]*PeerIn
 		return
 	}
 	delete(peers, addr)
+}
+
+func applyRelayRegistered(data map[string]interface{}, peers map[string]*PeerInfo) {
+	addr, _ := data["peer"].(string)
+	if addr == "" {
+		return
+	}
+
+	p, ok := peers[addr]
+	if !ok {
+		return
+	}
+
+	p.IsRelay = true
+	if relayAddr, ok := data["relay_addr"].(string); ok {
+		p.RelayAddr = relayAddr
+	}
+	if region, ok := data["region"].(string); ok {
+		p.Region = region
+	}
+	if isp, ok := data["isp"].(string); ok {
+		p.ISP = isp
+	}
+	if capacity, ok := data["relay_capacity"].(float64); ok {
+		p.RelayCapacity = uint64(capacity)
+	}
+	p.UptimeScore = 100 // default from contract
 }

@@ -272,6 +272,14 @@ module fractalmind_envd::peer {
 
     public fun peer_status_online(): u8 { PEER_STATUS_ONLINE }
     public fun peer_status_offline(): u8 { PEER_STATUS_OFFLINE }
+    public fun e_peer_not_found(): u64 { E_PEER_NOT_FOUND }
+
+    // ===== Package-visible UID Accessors =====
+    // Enable dynamic field extensions from other modules in this package
+
+    public(package) fun borrow_registry_uid(registry: &PeerRegistry): &UID { &registry.id }
+
+    public(package) fun borrow_registry_uid_mut(registry: &mut PeerRegistry): &mut UID { &mut registry.id }
 
     // ===== Test Helpers =====
 
