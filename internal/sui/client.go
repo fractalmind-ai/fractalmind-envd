@@ -51,11 +51,6 @@ func NewClient(cfg config.SUIConfig) (*Client, error) {
 		certID:     cfg.CertID,
 	}
 
-	if cfg.Sponsor.Enabled && cfg.Sponsor.URL != "" {
-		c.sponsor = NewSponsorClient(cfg.Sponsor.URL)
-		log.Printf("[sui] sponsor enabled: %s", cfg.Sponsor.URL)
-	}
-
 	return c, nil
 }
 
@@ -74,6 +69,12 @@ func newClientWithRPC(rpc RPCClient, kp *Keypair, packageID, registryID, orgID, 
 // Address returns the SUI address of this client.
 func (c *Client) Address() string {
 	return c.keypair.Address()
+}
+
+// SetSponsor attaches a sponsor client for gas sponsorship.
+func (c *Client) SetSponsor(sc *SponsorClient) {
+	c.sponsor = sc
+	log.Printf("[sui] sponsor client attached")
 }
 
 // RegisterPeer registers this node on-chain with its WireGuard public key and endpoints.

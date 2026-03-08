@@ -14,7 +14,7 @@ import (
 	"github.com/fractalmind-ai/fractalmind-envd/internal/agent"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/config"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/heartbeat"
-	"github.com/fractalmind-ai/fractalmind-envd/internal/stun"
+	"github.com/fractalmind-ai/fractalmind-envd/internal/roles"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/sui"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/wg"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/ws"
@@ -60,6 +60,9 @@ func main() {
 		scanInterval = 10 * time.Second
 	}
 
+	// ======= v3: Resolve active roles =======
+	activeRoles := roles.Resolve(cfg)
+
 	// Initialize components
 	scanner := agent.NewScanner(cfg.Agents.ScanMethod)
 	wsClient := ws.NewClient(cfg.Gateway.URL, reconnectWait)
@@ -92,17 +95,11 @@ func main() {
 			log.Fatalf("failed to setup wg interface: %v", err)
 		}
 
-		// 2. STUN endpoint discovery
+		// 2. Build endpoints list (use NAT detection result from role resolution)
 		var endpoints []string
-		if cfg.STUN.Enabled {
-			publicEndpoint, err := stun.DiscoverEndpoint(cfg.STUN.Servers)
-			if err != nil {
-				log.Printf("[stun] endpoint discovery failed: %v", err)
-			} else {
-				endpoints = append(endpoints, publicEndpoint)
-			}
+		if activeRoles.PublicEndpoint != "" {
+			endpoints = append(endpoints, activeRoles.PublicEndpoint)
 		}
-		// Add local listen address as fallback endpoint
 		if cfg.WireGuard.Address != "" {
 			endpoints = append(endpoints, cfg.WireGuard.Address)
 		}
@@ -116,7 +113,7 @@ func main() {
 			log.Fatalf("failed to create sui client: %v", err)
 		}
 
-		// 4. Register peer on-chain
+		// 4. Register peer on-chain (with relay info if applicable)
 		ctx := context.Background()
 		if err := suiClient.RegisterPeer(ctx, wgManager.PublicKey(), endpoints, cfg.Identity.Hostname); err != nil {
 			log.Printf("[sui] peer registration failed: %v", err)
@@ -138,6 +135,28 @@ func main() {
 			pollInterval = 30 * time.Second
 		}
 		suiPollTicker = time.NewTicker(pollInterval)
+	}
+
+	// ======= v3: Start role-specific services =======
+	if activeRoles.Relay {
+		log.Printf("[relay] relay server enabled on :%d (region=%s, isp=%s)",
+			cfg.Relay.ListenPort, cfg.Relay.Region, cfg.Relay.ISP)
+		// TODO KR2: Start pion/turn relay server
+	}
+
+	if activeRoles.StunServer {
+		log.Printf("[stun-server] STUN server enabled on :%d", cfg.Relay.ListenPort)
+		// TODO KR2: Start pion/stun server (shares port with relay)
+	}
+
+	if activeRoles.Sponsor {
+		log.Printf("[sponsor] sponsor role enabled (wallet=%s)", cfg.Sponsor.OrgWalletPath)
+		// TODO KR3: Start built-in sponsor service
+	}
+
+	if activeRoles.Coordinator {
+		log.Printf("[coordinator] REST API enabled")
+		// REST API already exists in current codebase
 	}
 
 	// Handle commands from Gateway
@@ -213,6 +232,13 @@ func main() {
 				lastAgents,
 				startedAt,
 			)
+
+			// v3: Attach relay load info if this node is a relay
+			if activeRoles.Relay {
+				// TODO KR2: Get actual relay metrics from pion/turn server
+				payload.WithRelayLoad(0, uint64(cfg.Relay.MaxConnections), 0)
+			}
+
 			if err := wsClient.Send("heartbeat", payload); err != nil {
 				log.Printf("[heartbeat] send failed: %v", err)
 			}
