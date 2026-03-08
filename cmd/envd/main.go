@@ -14,6 +14,7 @@ import (
 	"github.com/fractalmind-ai/fractalmind-envd/internal/agent"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/config"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/heartbeat"
+	"github.com/fractalmind-ai/fractalmind-envd/internal/relay"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/roles"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/sui"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/wg"
@@ -138,15 +139,28 @@ func main() {
 	}
 
 	// ======= v3: Start role-specific services =======
+	var relayServer *relay.Server
+	var stunOnlyServer *relay.StunOnlyServer
+
 	if activeRoles.Relay {
+		// Combined STUN + Relay on shared UDP port
+		relayServer = relay.NewServer(relay.Config{
+			ListenPort:     cfg.Relay.ListenPort,
+			PublicIP:       activeRoles.PublicEndpoint,
+			MaxConnections: cfg.Relay.MaxConnections,
+		})
+		if err := relayServer.Start(); err != nil {
+			log.Fatalf("[relay] failed to start: %v", err)
+		}
 		log.Printf("[relay] relay server enabled on :%d (region=%s, isp=%s)",
 			cfg.Relay.ListenPort, cfg.Relay.Region, cfg.Relay.ISP)
-		// TODO KR2: Start pion/turn relay server
-	}
-
-	if activeRoles.StunServer {
+	} else if activeRoles.StunServer {
+		// STUN-only server (no relay capability)
+		stunOnlyServer = relay.NewStunOnlyServer(cfg.Relay.ListenPort)
+		if err := stunOnlyServer.Start(); err != nil {
+			log.Fatalf("[stun-server] failed to start: %v", err)
+		}
 		log.Printf("[stun-server] STUN server enabled on :%d", cfg.Relay.ListenPort)
-		// TODO KR2: Start pion/stun server (shares port with relay)
 	}
 
 	if activeRoles.Sponsor {
@@ -234,9 +248,9 @@ func main() {
 			)
 
 			// v3: Attach relay load info if this node is a relay
-			if activeRoles.Relay {
-				// TODO KR2: Get actual relay metrics from pion/turn server
-				payload.WithRelayLoad(0, uint64(cfg.Relay.MaxConnections), 0)
+			if activeRoles.Relay && relayServer != nil {
+				info := relayServer.GetLoadInfo()
+				payload.WithRelayLoad(info.CurrentLoad, info.Capacity, info.AvgLatencyMs)
 			}
 
 			if err := wsClient.Send("heartbeat", payload); err != nil {
@@ -262,6 +276,18 @@ func main() {
 
 		case sig := <-sigCh:
 			log.Printf("received signal %s, shutting down", sig)
+
+			// Graceful relay/STUN shutdown
+			if relayServer != nil {
+				if err := relayServer.Close(); err != nil {
+					log.Printf("[relay] close failed: %v", err)
+				}
+			}
+			if stunOnlyServer != nil {
+				if err := stunOnlyServer.Close(); err != nil {
+					log.Printf("[stun-server] close failed: %v", err)
+				}
+			}
 
 			// Graceful SUI + WireGuard shutdown
 			if suiClient != nil {

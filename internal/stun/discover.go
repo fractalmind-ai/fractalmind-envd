@@ -10,6 +10,34 @@ import (
 	stunlib "github.com/pion/stun/v3"
 )
 
+// LayeredDiscover tries STUN servers in priority order:
+//  1. Org STUN servers (same org, discovered on-chain)
+//  2. Shared STUN servers (cross-org, discovered on-chain)
+//  3. Public STUN servers (Google/Cloudflare, from config)
+//
+// Returns the first successful endpoint discovery.
+func LayeredDiscover(orgServers, sharedServers, publicServers []string) (string, error) {
+	if len(orgServers) > 0 {
+		endpoint, err := DiscoverEndpoint(orgServers)
+		if err == nil {
+			log.Printf("[stun] resolved via org STUN")
+			return endpoint, nil
+		}
+		log.Printf("[stun] org STUN failed, trying shared: %v", err)
+	}
+
+	if len(sharedServers) > 0 {
+		endpoint, err := DiscoverEndpoint(sharedServers)
+		if err == nil {
+			log.Printf("[stun] resolved via shared STUN")
+			return endpoint, nil
+		}
+		log.Printf("[stun] shared STUN failed, trying public: %v", err)
+	}
+
+	return DiscoverEndpoint(publicServers)
+}
+
 // DiscoverEndpoint uses STUN to discover the public IP:port of this host.
 // Tries servers in order, returns the first successful result.
 func DiscoverEndpoint(servers []string) (string, error) {
