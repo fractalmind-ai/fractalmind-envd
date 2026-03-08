@@ -177,8 +177,10 @@ jobs:
           echo "=== Original Protocol Move.toml ==="
           cat "$PROTOCOL_TOML"
 
-          # Add published-at field and fix address to match on-chain package
-          sed -i "s|^edition = \"2024.beta\"|edition = \"2024.beta\"\npublished-at = \"${PROTOCOL_PACKAGE_ID}\"|" "$PROTOCOL_TOML"
+          # Add published-at field if not already present, and fix address
+          if ! grep -q '^published-at' "$PROTOCOL_TOML"; then
+            sed -i "s|^edition = \"2024.beta\"|edition = \"2024.beta\"\npublished-at = \"${PROTOCOL_PACKAGE_ID}\"|" "$PROTOCOL_TOML"
+          fi
           sed -i "s|^fractalmind_protocol = \"0x0\"|fractalmind_protocol = \"${PROTOCOL_PACKAGE_ID}\"|" "$PROTOCOL_TOML"
 
           echo "=== Patched Protocol Move.toml ==="
