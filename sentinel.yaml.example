@@ -1,13 +1,17 @@
-# sentinel.yaml.example — fractalmind-envd configuration
+# sentinel.yaml.example — fractalmind-envd v3 configuration
 # Copy to sentinel.yaml and edit for your environment.
-
-gateway:
-  url: ws://localhost:8080/ws
-  reconnect_interval: 5s
 
 identity:
   host_id: ""          # auto-generated if empty
   hostname: ""         # defaults to os.Hostname()
+
+# Roles control which capabilities this node provides.
+# relay + stun_server auto-enable when a public IP is detected (via STUN probe).
+roles:
+  coordinator: false   # REST API management interface
+  sponsor: false       # Org-level gas sponsorship (requires sponsor.org_wallet_path)
+  # relay: null        # Auto-detect (public IP → true). Set true/false to override.
+  # stun_server: null  # Auto-detect (public IP → true). Set true/false to override.
 
 agents:
   scan_method: tmux    # tmux | systemd | docker
@@ -16,7 +20,7 @@ agents:
   max_restart_attempts: 3
 
 heartbeat:
-  interval: 30s
+  interval: 30s        # Relay nodes include relay_load in P2P heartbeat
 
 # SUI blockchain control plane (peer discovery, identity, ACL)
 sui:
@@ -37,9 +41,34 @@ wireguard:
   keypair_path: ~/.wireguard/envd.key # Curve25519 keypair (auto-generated if missing)
   # address: 10.100.X.Y/32            # Auto-assigned from SUI address hash if empty
 
-# STUN NAT endpoint discovery
+# STUN client — NAT type detection + endpoint discovery.
+# Also used for role auto-detection: public IP → auto-enable relay + stun_server.
 stun:
-  enabled: false
-  servers:
+  enabled: true                        # Recommended: always enable for NAT detection
+  servers:                             # Public STUN fallback (org/shared STUN discovered on-chain)
     - stun:stun.l.google.com:19302
     - stun:stun1.l.google.com:19302
+
+# Sponsor role config — org-level gas sponsorship.
+# Only used when roles.sponsor=true. Worker nodes' chain TXs are co-signed
+# by this node using the org wallet, so workers don't need to hold SUI.
+sponsor:
+  org_wallet_path: ""                  # Path to org wallet Ed25519 keypair
+  max_gas_per_tx: 10000000             # Max gas per TX in MIST (0.01 SUI)
+  daily_gas_limit: 100000000           # Daily gas budget in MIST (0.1 SUI)
+  allowed_packages:                    # Contract allowlist (only these packages can be sponsored)
+    - "0x..."                          # fractalmind_envd package
+
+# Relay server config — WireGuard packet forwarding + STUN server.
+# Auto-enabled when public IP is detected (or roles.relay=true).
+relay:
+  listen_port: 3478                    # UDP port for STUN + Relay (shared)
+  max_connections: 100                 # Max simultaneous relay connections
+  bandwidth_limit: ""                  # Optional bandwidth cap (e.g. "100mbps")
+  region: ""                           # Geographic region (e.g. "cn-east", "us-west")
+  isp: ""                              # Network provider (e.g. "aliyun", "aws")
+
+# Legacy: Gateway WebSocket (kept for backwards-compatibility, not used in v3 P2P mode)
+gateway:
+  url: ws://localhost:8080/ws
+  reconnect_interval: 5s

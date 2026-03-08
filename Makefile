@@ -2,7 +2,7 @@ BINARY = envd
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS = -ldflags "-X main.version=$(VERSION)"
 
-.PHONY: build clean test run install
+.PHONY: build clean test run install build-sponsor run-sponsor
 
 build:
 	go build $(LDFLAGS) -o bin/$(BINARY) ./cmd/envd
@@ -25,3 +25,9 @@ run: build
 
 install: build
 	cp bin/$(BINARY) /usr/local/bin/$(BINARY)
+
+build-sponsor:
+	go build $(LDFLAGS) -o bin/sponsor-service ./cmd/sponsor-service
+
+run-sponsor: build-sponsor
+	./bin/sponsor-service

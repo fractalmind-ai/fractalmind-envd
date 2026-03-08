@@ -16,17 +16,19 @@ import (
 type RPCClient interface {
 	MoveCall(ctx context.Context, req models.MoveCallRequest) (models.TxnMetaData, error)
 	SignAndExecuteTransactionBlock(ctx context.Context, req models.SignAndExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error)
+	SuiExecuteTransactionBlock(ctx context.Context, req models.SuiExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error)
 	SuiXQueryEvents(ctx context.Context, req models.SuiXQueryEventsRequest) (models.PaginatedEventsResponse, error)
 }
 
 // Client is the SUI blockchain client for peer registry operations.
 type Client struct {
-	rpc        RPCClient
-	keypair    *Keypair
-	packageID  string
+	rpc       RPCClient
+	keypair   *Keypair
+	packageID string
 	registryID string
-	orgID      string
-	certID     string
+	orgID     string
+	certID    string
+	sponsor   *SponsorClient
 }
 
 // NewClient creates a SUI client from config.
@@ -40,14 +42,16 @@ func NewClient(cfg config.SUIConfig) (*Client, error) {
 
 	log.Printf("[sui] address=%s", kp.Address())
 
-	return &Client{
+	c := &Client{
 		rpc:        rpc,
 		keypair:    kp,
 		packageID:  cfg.PackageID,
 		registryID: cfg.RegistryID,
 		orgID:      cfg.OrgID,
 		certID:     cfg.CertID,
-	}, nil
+	}
+
+	return c, nil
 }
 
 // newClientWithRPC creates a client with a custom RPC (for testing).
@@ -65,6 +69,12 @@ func newClientWithRPC(rpc RPCClient, kp *Keypair, packageID, registryID, orgID, 
 // Address returns the SUI address of this client.
 func (c *Client) Address() string {
 	return c.keypair.Address()
+}
+
+// SetSponsor attaches a sponsor client for gas sponsorship.
+func (c *Client) SetSponsor(sc *SponsorClient) {
+	c.sponsor = sc
+	log.Printf("[sui] sponsor client attached")
 }
 
 // RegisterPeer registers this node on-chain with its WireGuard public key and endpoints.
@@ -131,6 +141,35 @@ func (c *Client) GoOnline(ctx context.Context, endpoints []string) error {
 	return nil
 }
 
+// RegisterRelay registers this node as a relay on-chain with relay metadata.
+func (c *Client) RegisterRelay(ctx context.Context, relayAddr, region, isp string, capacity uint64) error {
+	err := c.executeMoveCall(ctx, "relay_info", "register_relay", []interface{}{
+		c.registryID,
+		relayAddr,
+		region,
+		isp,
+		fmt.Sprintf("%d", capacity),
+	})
+	if err != nil {
+		return fmt.Errorf("register relay: %w", err)
+	}
+	log.Printf("[sui] registered as relay on-chain (addr=%s, region=%s)", relayAddr, region)
+	return nil
+}
+
+// UpdateUptimeScore updates this relay's uptime score on-chain.
+func (c *Client) UpdateUptimeScore(ctx context.Context, score uint64) error {
+	err := c.executeMoveCall(ctx, "relay_info", "update_uptime_score", []interface{}{
+		c.registryID,
+		fmt.Sprintf("%d", score),
+	})
+	if err != nil {
+		return fmt.Errorf("update uptime score: %w", err)
+	}
+	log.Printf("[sui] uptime score updated to %d", score)
+	return nil
+}
+
 // QueryPeers fetches all PeerRegistered events and overlays status/endpoint
 // updates to build the current peer state.
 func (c *Client) QueryPeers(ctx context.Context) ([]PeerInfo, error) {
@@ -152,6 +191,12 @@ func (c *Client) QueryPeers(ctx context.Context) ([]PeerInfo, error) {
 	statusType := fmt.Sprintf("%s::peer::PeerStatusChanged", c.packageID)
 	if err := c.fetchAllEvents(ctx, statusType, peers, applyPeerStatusChanged); err != nil {
 		return nil, fmt.Errorf("query PeerStatusChanged events: %w", err)
+	}
+
+	// Overlay RelayRegistered (relay_info module)
+	relayRegType := fmt.Sprintf("%s::relay_info::RelayRegistered", c.packageID)
+	if err := c.fetchAllEvents(ctx, relayRegType, peers, applyRelayRegistered); err != nil {
+		return nil, fmt.Errorf("query RelayRegistered events: %w", err)
 	}
 
 	// Remove deregistered peers
@@ -183,6 +228,7 @@ func (c *Client) PollNewEvents(ctx context.Context, cursor string) ([]PeerInfo, 
 		fmt.Sprintf("%s::peer::PeerEndpointUpdated", c.packageID),
 		fmt.Sprintf("%s::peer::PeerStatusChanged", c.packageID),
 		fmt.Sprintf("%s::peer::PeerDeregistered", c.packageID),
+		fmt.Sprintf("%s::relay_info::RelayRegistered", c.packageID),
 	}
 
 	appliers := []func(map[string]interface{}, map[string]*PeerInfo){
@@ -190,6 +236,7 @@ func (c *Client) PollNewEvents(ctx context.Context, cursor string) ([]PeerInfo, 
 		applyPeerEndpointUpdated,
 		applyPeerStatusChanged,
 		applyPeerDeregistered,
+		applyRelayRegistered,
 	}
 
 	for i, eventType := range eventTypes {
@@ -224,7 +271,16 @@ func (c *Client) PollNewEvents(ctx context.Context, cursor string) ([]PeerInfo, 
 }
 
 // executeMoveCall builds, signs, and executes a Move function call.
+// If sponsor is enabled, routes through the Sponsor Service for gas sponsorship.
 func (c *Client) executeMoveCall(ctx context.Context, module, function string, args []interface{}) error {
+	if c.sponsor != nil {
+		return c.executeViaSponsorship(ctx, module, function, args)
+	}
+	return c.executeDirect(ctx, module, function, args)
+}
+
+// executeDirect builds, signs, and executes a TX directly (self-paying gas).
+func (c *Client) executeDirect(ctx context.Context, module, function string, args []interface{}) error {
 	txn, err := c.rpc.MoveCall(ctx, models.MoveCallRequest{
 		Signer:          c.keypair.Address(),
 		PackageObjectId: c.packageID,
@@ -251,6 +307,45 @@ func (c *Client) executeMoveCall(ctx context.Context, module, function string, a
 		return fmt.Errorf("execute tx: %w", err)
 	}
 
+	return nil
+}
+
+// executeViaSponsorship sends the move call intent to the Sponsor Service,
+// receives back (tx_bytes, sponsor_signature), co-signs with our key, and submits.
+func (c *Client) executeViaSponsorship(ctx context.Context, module, function string, args []interface{}) error {
+	req := SponsorRequest{
+		Sender:    c.keypair.Address(),
+		PackageID: c.packageID,
+		Module:    module,
+		Function:  function,
+		TypeArgs:  []interface{}{},
+		Args:      args,
+	}
+
+	resp, err := c.sponsor.RequestSponsorship(ctx, req)
+	if err != nil {
+		return fmt.Errorf("sponsor request: %w", err)
+	}
+
+	// Co-sign the tx_bytes with our keypair
+	txnMeta := models.TxnMetaData{TxBytes: resp.TxBytes}
+	signed := txnMeta.SignSerializedSigWith(c.keypair.Private)
+
+	// Submit with both signatures (sponsor first, then sender)
+	_, err = c.rpc.SuiExecuteTransactionBlock(ctx, models.SuiExecuteTransactionBlockRequest{
+		TxBytes:   resp.TxBytes,
+		Signature: []string{resp.SponsorSignature, signed.Signature},
+		Options: models.SuiTransactionBlockOptions{
+			ShowEffects: true,
+			ShowEvents:  true,
+		},
+		RequestType: "WaitForLocalExecution",
+	})
+	if err != nil {
+		return fmt.Errorf("execute sponsored tx: %w", err)
+	}
+
+	log.Printf("[sui] sponsored TX executed")
 	return nil
 }
 
@@ -364,4 +459,31 @@ func applyPeerDeregistered(data map[string]interface{}, peers map[string]*PeerIn
 		return
 	}
 	delete(peers, addr)
+}
+
+func applyRelayRegistered(data map[string]interface{}, peers map[string]*PeerInfo) {
+	addr, _ := data["peer"].(string)
+	if addr == "" {
+		return
+	}
+
+	p, ok := peers[addr]
+	if !ok {
+		return
+	}
+
+	p.IsRelay = true
+	if relayAddr, ok := data["relay_addr"].(string); ok {
+		p.RelayAddr = relayAddr
+	}
+	if region, ok := data["region"].(string); ok {
+		p.Region = region
+	}
+	if isp, ok := data["isp"].(string); ok {
+		p.ISP = isp
+	}
+	if capacity, ok := data["relay_capacity"].(float64); ok {
+		p.RelayCapacity = uint64(capacity)
+	}
+	p.UptimeScore = 100 // default from contract
 }
