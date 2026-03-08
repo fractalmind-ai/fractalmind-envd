@@ -16,6 +16,7 @@ import (
 	"github.com/fractalmind-ai/fractalmind-envd/internal/heartbeat"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/relay"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/roles"
+	"github.com/fractalmind-ai/fractalmind-envd/internal/sponsor"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/sui"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/wg"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/ws"
@@ -164,8 +165,18 @@ func main() {
 	}
 
 	if activeRoles.Sponsor {
-		log.Printf("[sponsor] sponsor role enabled (wallet=%s)", cfg.Sponsor.OrgWalletPath)
-		// TODO KR3: Start built-in sponsor service
+		sponsorSvc, err := sponsor.NewService(sponsor.Config{
+			SUI_RPC:         cfg.SUI.RPC,
+			OrgWalletPath:   cfg.Sponsor.OrgWalletPath,
+			AllowedPackages: cfg.Sponsor.AllowedPackages,
+			MaxGasPerTx:     cfg.Sponsor.MaxGasPerTx,
+			DailyGasLimit:   cfg.Sponsor.DailyGasLimit,
+		})
+		if err != nil {
+			log.Fatalf("[sponsor] failed to start: %v", err)
+		}
+		log.Printf("[sponsor] sponsor role enabled (wallet=%s, address=%s)", cfg.Sponsor.OrgWalletPath, sponsorSvc.Address())
+		_ = sponsorSvc // Used by P2P message handler (wired in WireGuard integration)
 	}
 
 	if activeRoles.Coordinator {
