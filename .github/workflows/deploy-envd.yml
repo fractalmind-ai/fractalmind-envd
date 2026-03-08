@@ -1,0 +1,325 @@
+name: Deploy envd
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Deployment target'
+        required: true
+        type: choice
+        options:
+          - shared-relay
+          - sulabs-org
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - deploy
+          - restart
+          - stop
+          - status
+        default: deploy
+
+env:
+  BINARY_NAME: envd
+  SERVICE_NAME: envd
+  INSTALL_DIR: /opt/envd
+  CONFIG_DIR: /etc/envd
+
+jobs:
+  build:
+    name: Build envd binary
+    runs-on: ubuntu-latest
+    if: inputs.action == 'deploy'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build Linux binary
+        run: make build-linux
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: envd-linux-amd64
+          path: bin/envd-linux-amd64
+
+  deploy:
+    name: Deploy to ${{ inputs.target }}
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: inputs.action == 'deploy'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: envd-linux-amd64
+          path: bin/
+
+      - name: Resolve target host
+        id: target
+        run: |
+          case "${{ inputs.target }}" in
+            shared-relay)
+              echo "host=${{ secrets.SHARED_RELAY_HOST }}" >> $GITHUB_OUTPUT
+              echo "user=${{ secrets.SHARED_RELAY_USER }}" >> $GITHUB_OUTPUT
+              echo "mode=shared" >> $GITHUB_OUTPUT
+              echo "hostname=shared-relay-01" >> $GITHUB_OUTPUT
+              ;;
+            sulabs-org)
+              echo "host=${{ secrets.SULABS_ORG_HOST }}" >> $GITHUB_OUTPUT
+              echo "user=${{ secrets.SULABS_ORG_USER }}" >> $GITHUB_OUTPUT
+              echo "mode=organization" >> $GITHUB_OUTPUT
+              echo "hostname=sulabs-org-01" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Verify secrets
+        run: |
+          if [ -z "${{ steps.target.outputs.host }}" ]; then
+            echo "::error::Host secret not configured for target '${{ inputs.target }}'"
+            echo "Required secrets:"
+            case "${{ inputs.target }}" in
+              shared-relay) echo "  SHARED_RELAY_HOST, SHARED_RELAY_USER, SHARED_RELAY_SSH_KEY" ;;
+              sulabs-org)   echo "  SULABS_ORG_HOST, SULABS_ORG_USER, SULABS_ORG_SSH_KEY" ;;
+            esac
+            exit 1
+          fi
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          case "${{ inputs.target }}" in
+            shared-relay) echo "${{ secrets.SHARED_RELAY_SSH_KEY }}" > ~/.ssh/deploy_key ;;
+            sulabs-org)   echo "${{ secrets.SULABS_ORG_SSH_KEY }}" > ~/.ssh/deploy_key ;;
+          esac
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ steps.target.outputs.host }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Generate sentinel.yaml
+        run: |
+          MODE="${{ steps.target.outputs.mode }}"
+          HOSTNAME="${{ steps.target.outputs.hostname }}"
+
+          if [ "$MODE" = "shared" ]; then
+            cat > sentinel.yaml <<'YAML'
+          identity:
+            hostname: "${HOSTNAME}"
+
+          roles:
+            coordinator: false
+            sponsor: false
+            # relay & stun auto-detect (public IP → enabled)
+
+          agents:
+            scan_method: tmux
+            scan_interval: 30s
+            auto_restart: true
+            max_restart_attempts: 3
+
+          heartbeat:
+            interval: 60s
+
+          sui:
+            enabled: true
+            rpc: https://fullnode.testnet.sui.io:443
+            keypair_path: /etc/envd/sui.key
+            package_id: '0xc3448b4cfbe7771a9d42b12d3231b4819dc68583e44f39f9f2613d085e90f8f1'
+            registry_id: '0xceaf0c2208cd561e01694e80ca7de37a0b0113856ddb45c032be02bbb1969bee'
+            # No org_id — shared mode, not bound to any organization
+
+          wireguard:
+            enabled: true
+            interface_name: wg-envd
+            listen_port: 51820
+            keypair_path: /etc/envd/wg.key
+
+          relay:
+            listen_port: 3478
+            max_connections: 200
+            bandwidth_limit: 100mbps
+
+          stun:
+            enabled: true
+            servers:
+              - stun:stun.l.google.com:19302
+              - stun:stun1.l.google.com:19302
+          YAML
+          else
+            cat > sentinel.yaml <<'YAML'
+          identity:
+            hostname: "${HOSTNAME}"
+
+          roles:
+            coordinator: true
+            sponsor: true
+            # relay & stun auto-detect
+
+          agents:
+            scan_method: tmux
+            scan_interval: 10s
+            auto_restart: true
+            max_restart_attempts: 3
+
+          heartbeat:
+            interval: 30s
+
+          sui:
+            enabled: true
+            rpc: https://fullnode.testnet.sui.io:443
+            keypair_path: /etc/envd/sui.key
+            package_id: '0xc3448b4cfbe7771a9d42b12d3231b4819dc68583e44f39f9f2613d085e90f8f1'
+            registry_id: '0xceaf0c2208cd561e01694e80ca7de37a0b0113856ddb45c032be02bbb1969bee'
+            org_id: '0x66f00e15b28696a3824eb23b3cb3f0070d5f0fd1050c7ae32e2e2bce2565f0cb'
+
+          wireguard:
+            enabled: true
+            interface_name: wg-envd
+            listen_port: 51820
+            keypair_path: /etc/envd/wg.key
+
+          sponsor:
+            org_wallet_path: /etc/envd/org-wallet.key
+            max_gas_per_tx: 10000000
+            daily_gas_limit: 100000000
+            allowed_packages:
+              - '0xc3448b4cfbe7771a9d42b12d3231b4819dc68583e44f39f9f2613d085e90f8f1'
+              - '0x685d6fb6ed8b0e679bb467ea73111819ec6ff68b1466d24ca26b400095dcdf24'
+
+          relay:
+            listen_port: 3478
+            max_connections: 200
+
+          stun:
+            enabled: true
+            servers:
+              - stun:stun.l.google.com:19302
+              - stun:stun1.l.google.com:19302
+          YAML
+          fi
+
+          # Substitute hostname
+          sed -i "s/\${HOSTNAME}/${HOSTNAME}/g" sentinel.yaml
+          echo "=== Generated sentinel.yaml ==="
+          cat sentinel.yaml
+
+      - name: Deploy to server
+        env:
+          HOST: ${{ steps.target.outputs.host }}
+          USER: ${{ steps.target.outputs.user }}
+        run: |
+          set -euo pipefail
+          SSH="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new ${USER}@${HOST}"
+          SCP="scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new"
+
+          echo "=== Creating directories ==="
+          $SSH "sudo mkdir -p ${INSTALL_DIR} ${CONFIG_DIR} && sudo chown ${USER}: ${INSTALL_DIR} ${CONFIG_DIR}"
+
+          echo "=== Uploading binary ==="
+          chmod +x bin/envd-linux-amd64
+          $SCP bin/envd-linux-amd64 "${USER}@${HOST}:${INSTALL_DIR}/envd"
+
+          echo "=== Uploading config ==="
+          $SCP sentinel.yaml "${USER}@${HOST}:${CONFIG_DIR}/sentinel.yaml"
+
+          echo "=== Creating systemd service ==="
+          $SSH "sudo tee /etc/systemd/system/envd.service > /dev/null" <<SERVICE
+          [Unit]
+          Description=FractalMind envd - AI Agent Remote Management
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=${USER}
+          ExecStart=${INSTALL_DIR}/envd --config ${CONFIG_DIR}/sentinel.yaml
+          Restart=always
+          RestartSec=5
+          LimitNOFILE=65535
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+
+          echo "=== Starting service ==="
+          $SSH "sudo systemctl daemon-reload && sudo systemctl enable envd && sudo systemctl restart envd"
+
+          echo "=== Verifying ==="
+          sleep 3
+          $SSH "sudo systemctl status envd --no-pager" || true
+          $SSH "${INSTALL_DIR}/envd --version" || true
+
+      - name: Deployment summary
+        run: |
+          cat <<EOF >> $GITHUB_STEP_SUMMARY
+          # envd Deployment — ${{ inputs.target }}
+
+          | Field | Value |
+          |-------|-------|
+          | **Target** | ${{ inputs.target }} |
+          | **Host** | ${{ steps.target.outputs.host }} |
+          | **Mode** | ${{ steps.target.outputs.mode }} |
+          | **Hostname** | ${{ steps.target.outputs.hostname }} |
+          | **Action** | ${{ inputs.action }} |
+          | **Timestamp** | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |
+
+          ## Config
+          - Install: \`${INSTALL_DIR}/envd\`
+          - Config: \`${CONFIG_DIR}/sentinel.yaml\`
+          - Service: \`systemctl status envd\`
+          EOF
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+  manage:
+    name: ${{ inputs.action }} on ${{ inputs.target }}
+    runs-on: ubuntu-latest
+    if: inputs.action != 'deploy'
+    steps:
+      - name: Resolve target host
+        id: target
+        run: |
+          case "${{ inputs.target }}" in
+            shared-relay)
+              echo "host=${{ secrets.SHARED_RELAY_HOST }}" >> $GITHUB_OUTPUT
+              echo "user=${{ secrets.SHARED_RELAY_USER }}" >> $GITHUB_OUTPUT
+              ;;
+            sulabs-org)
+              echo "host=${{ secrets.SULABS_ORG_HOST }}" >> $GITHUB_OUTPUT
+              echo "user=${{ secrets.SULABS_ORG_USER }}" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          case "${{ inputs.target }}" in
+            shared-relay) echo "${{ secrets.SHARED_RELAY_SSH_KEY }}" > ~/.ssh/deploy_key ;;
+            sulabs-org)   echo "${{ secrets.SULABS_ORG_SSH_KEY }}" > ~/.ssh/deploy_key ;;
+          esac
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ steps.target.outputs.host }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Execute ${{ inputs.action }}
+        env:
+          HOST: ${{ steps.target.outputs.host }}
+          USER: ${{ steps.target.outputs.user }}
+        run: |
+          SSH="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new ${USER}@${HOST}"
+          case "${{ inputs.action }}" in
+            restart) $SSH "sudo systemctl restart envd && sleep 2 && sudo systemctl status envd --no-pager" ;;
+            stop)    $SSH "sudo systemctl stop envd && sudo systemctl status envd --no-pager" ;;
+            status)  $SSH "sudo systemctl status envd --no-pager; echo '---'; sudo journalctl -u envd --no-pager -n 30" ;;
+          esac
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
