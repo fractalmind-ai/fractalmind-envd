@@ -18,10 +18,11 @@ import (
 
 // mockRPC implements RPCClient for testing.
 type mockRPC struct {
-	moveCallFn    func(ctx context.Context, req models.MoveCallRequest) (models.TxnMetaData, error)
-	signExecFn    func(ctx context.Context, req models.SignAndExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error)
-	execFn        func(ctx context.Context, req models.SuiExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error)
-	queryEventsFn func(ctx context.Context, req models.SuiXQueryEventsRequest) (models.PaginatedEventsResponse, error)
+	moveCallFn      func(ctx context.Context, req models.MoveCallRequest) (models.TxnMetaData, error)
+	signExecFn      func(ctx context.Context, req models.SignAndExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error)
+	execFn          func(ctx context.Context, req models.SuiExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error)
+	queryEventsFn   func(ctx context.Context, req models.SuiXQueryEventsRequest) (models.PaginatedEventsResponse, error)
+	ownedObjectsFn  func(ctx context.Context, req models.SuiXGetOwnedObjectsRequest) (models.PaginatedObjectsResponse, error)
 }
 
 func (m *mockRPC) MoveCall(ctx context.Context, req models.MoveCallRequest) (models.TxnMetaData, error) {
@@ -50,6 +51,13 @@ func (m *mockRPC) SuiXQueryEvents(ctx context.Context, req models.SuiXQueryEvent
 		return m.queryEventsFn(ctx, req)
 	}
 	return models.PaginatedEventsResponse{}, nil
+}
+
+func (m *mockRPC) SuiXGetOwnedObjects(ctx context.Context, req models.SuiXGetOwnedObjectsRequest) (models.PaginatedObjectsResponse, error) {
+	if m.ownedObjectsFn != nil {
+		return m.ownedObjectsFn(ctx, req)
+	}
+	return models.PaginatedObjectsResponse{}, nil
 }
 
 func testKeypair(t *testing.T) *Keypair {
@@ -115,7 +123,7 @@ func TestRegisterPeer(t *testing.T) {
 		},
 	}
 
-	client := newClientWithRPC(mock, kp, "0xpkg", "0xreg", "0xorg", "0xcert")
+	client := newClientWithRPC(mock, kp, "0xpkg", "0xproto", "0xreg", "0xorg", "0xcert")
 
 	wgKey := make([]byte, 32)
 	err := client.RegisterPeer(context.Background(), wgKey, []string{"1.2.3.4:51820"}, "test-host")
@@ -139,7 +147,7 @@ func TestGoOffline(t *testing.T) {
 		},
 	}
 
-	client := newClientWithRPC(mock, kp, "0xpkg", "0xreg", "0xorg", "0xcert")
+	client := newClientWithRPC(mock, kp, "0xpkg", "0xproto", "0xreg", "0xorg", "0xcert")
 
 	if err := client.GoOffline(context.Background()); err != nil {
 		t.Fatalf("GoOffline: %v", err)
@@ -185,7 +193,7 @@ func TestQueryPeers(t *testing.T) {
 		},
 	}
 
-	client := newClientWithRPC(mock, kp, "0xpkg", "0xreg", "0xorg", "0xcert")
+	client := newClientWithRPC(mock, kp, "0xpkg", "0xproto", "0xreg", "0xorg", "0xcert")
 
 	peers, err := client.QueryPeers(context.Background())
 	if err != nil {
@@ -287,7 +295,7 @@ func TestExecuteViaSponsorship(t *testing.T) {
 		},
 	}
 
-	client := newClientWithRPC(mock, kp, "0xpkg", "0xreg", "0xorg", "0xcert")
+	client := newClientWithRPC(mock, kp, "0xpkg", "0xproto", "0xreg", "0xorg", "0xcert")
 	client.sponsor = NewSponsorClient(srv.URL)
 
 	err := client.GoOffline(context.Background())
@@ -336,7 +344,7 @@ func TestDirectVsSponsoredRouting(t *testing.T) {
 			return models.TxnMetaData{}, nil
 		},
 	}
-	client := newClientWithRPC(mock, kp, "0xpkg", "0xreg", "0xorg", "0xcert")
+	client := newClientWithRPC(mock, kp, "0xpkg", "0xproto", "0xreg", "0xorg", "0xcert")
 
 	if err := client.GoOffline(context.Background()); err != nil {
 		t.Fatalf("direct GoOffline: %v", err)
@@ -366,7 +374,7 @@ func TestDirectVsSponsoredRouting(t *testing.T) {
 			return models.SuiTransactionBlockResponse{}, nil
 		},
 	}
-	client2 := newClientWithRPC(mock2, kp, "0xpkg", "0xreg", "0xorg", "0xcert")
+	client2 := newClientWithRPC(mock2, kp, "0xpkg", "0xproto", "0xreg", "0xorg", "0xcert")
 	client2.sponsor = NewSponsorClient(srv.URL)
 
 	if err := client2.GoOffline(context.Background()); err != nil {

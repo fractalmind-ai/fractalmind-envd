@@ -18,17 +18,19 @@ type RPCClient interface {
 	SignAndExecuteTransactionBlock(ctx context.Context, req models.SignAndExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error)
 	SuiExecuteTransactionBlock(ctx context.Context, req models.SuiExecuteTransactionBlockRequest) (models.SuiTransactionBlockResponse, error)
 	SuiXQueryEvents(ctx context.Context, req models.SuiXQueryEventsRequest) (models.PaginatedEventsResponse, error)
+	SuiXGetOwnedObjects(ctx context.Context, req models.SuiXGetOwnedObjectsRequest) (models.PaginatedObjectsResponse, error)
 }
 
 // Client is the SUI blockchain client for peer registry operations.
 type Client struct {
-	rpc       RPCClient
-	keypair   *Keypair
-	packageID string
-	registryID string
-	orgID     string
-	certID    string
-	sponsor   *SponsorClient
+	rpc               RPCClient
+	keypair           *Keypair
+	packageID         string
+	protocolPackageID string
+	registryID        string
+	orgID             string
+	certID            string
+	sponsor           *SponsorClient
 }
 
 // NewClient creates a SUI client from config.
@@ -43,26 +45,28 @@ func NewClient(cfg config.SUIConfig) (*Client, error) {
 	log.Printf("[sui] address=%s", kp.Address())
 
 	c := &Client{
-		rpc:        rpc,
-		keypair:    kp,
-		packageID:  cfg.PackageID,
-		registryID: cfg.RegistryID,
-		orgID:      cfg.OrgID,
-		certID:     cfg.CertID,
+		rpc:               rpc,
+		keypair:           kp,
+		packageID:         cfg.PackageID,
+		protocolPackageID: cfg.ProtocolPackageID,
+		registryID:        cfg.RegistryID,
+		orgID:             cfg.OrgID,
+		certID:            cfg.CertID,
 	}
 
 	return c, nil
 }
 
 // newClientWithRPC creates a client with a custom RPC (for testing).
-func newClientWithRPC(rpc RPCClient, kp *Keypair, packageID, registryID, orgID, certID string) *Client {
+func newClientWithRPC(rpc RPCClient, kp *Keypair, packageID, protocolPackageID, registryID, orgID, certID string) *Client {
 	return &Client{
-		rpc:        rpc,
-		keypair:    kp,
-		packageID:  packageID,
-		registryID: registryID,
-		orgID:      orgID,
-		certID:     certID,
+		rpc:               rpc,
+		keypair:           kp,
+		packageID:         packageID,
+		protocolPackageID: protocolPackageID,
+		registryID:        registryID,
+		orgID:             orgID,
+		certID:            certID,
 	}
 }
 
@@ -79,8 +83,18 @@ func (c *Client) SetSponsor(sc *SponsorClient) {
 
 // RegisterPeer registers this node on-chain with its WireGuard public key and endpoints.
 // If the peer is already registered (abort code 8001), it calls GoOnline instead.
+// If certID is not configured, auto-discovers or creates an AgentCertificate.
 func (c *Client) RegisterPeer(ctx context.Context, wgPubKey []byte, endpoints []string, hostname string) error {
-	pubKeyHex := hex.EncodeToString(wgPubKey)
+	// Auto-discover cert if not configured
+	if c.certID == "" {
+		certID, err := c.ensureAgentCert(ctx)
+		if err != nil {
+			return fmt.Errorf("ensure agent cert: %w", err)
+		}
+		c.certID = certID
+	}
+
+	pubKeyHex := "0x" + hex.EncodeToString(wgPubKey)
 
 	err := c.executeMoveCall(ctx, "peer", "register_peer", []interface{}{
 		c.registryID,
@@ -218,7 +232,7 @@ func (c *Client) QueryPeers(ctx context.Context) ([]PeerInfo, error) {
 }
 
 // PollNewEvents fetches events since the given cursor and returns updated peers.
-func (c *Client) PollNewEvents(ctx context.Context, cursor string) ([]PeerInfo, string, error) {
+func (c *Client) PollNewEvents(ctx context.Context, cursor interface{}) ([]PeerInfo, interface{}, error) {
 	peers := make(map[string]*PeerInfo)
 	newCursor := cursor
 
@@ -256,7 +270,7 @@ func (c *Client) PollNewEvents(ctx context.Context, cursor string) ([]PeerInfo, 
 		}
 
 		if resp.NextCursor.TxDigest != "" {
-			newCursor = resp.NextCursor.TxDigest
+			newCursor = resp.NextCursor
 		}
 	}
 
@@ -356,7 +370,7 @@ func (c *Client) fetchAllEvents(
 	peers map[string]*PeerInfo,
 	apply func(map[string]interface{}, map[string]*PeerInfo),
 ) error {
-	cursor := ""
+	var cursor interface{} // nil for first request, EventId for subsequent
 	for {
 		resp, err := c.rpc.SuiXQueryEvents(ctx, models.SuiXQueryEventsRequest{
 			SuiEventFilter: models.EventFilterByMoveEventType{
@@ -376,8 +390,132 @@ func (c *Client) fetchAllEvents(
 		if !resp.HasNextPage {
 			break
 		}
-		cursor = resp.NextCursor.TxDigest
+		cursor = resp.NextCursor
 	}
+	return nil
+}
+
+// ensureAgentCert discovers or creates an AgentCertificate for this node.
+// Returns the cert object ID. Requires protocolPackageID to be configured.
+func (c *Client) ensureAgentCert(ctx context.Context) (string, error) {
+	if c.protocolPackageID == "" {
+		return "", fmt.Errorf("protocol_package_id not configured; required for auto cert discovery")
+	}
+
+	certType := fmt.Sprintf("%s::agent::AgentCertificate", c.protocolPackageID)
+	log.Printf("[sui] looking for AgentCertificate (type=%s)", certType)
+
+	// 1. Query owned objects for existing cert
+	resp, err := c.rpc.SuiXGetOwnedObjects(ctx, models.SuiXGetOwnedObjectsRequest{
+		Address: c.keypair.Address(),
+		Query: models.SuiObjectResponseQuery{
+			Filter:  models.ObjectFilterByStructType{StructType: certType},
+			Options: models.SuiObjectDataOptions{ShowType: true},
+		},
+		Limit: 10,
+	})
+	if err != nil {
+		return "", fmt.Errorf("query owned objects: %w", err)
+	}
+
+	for _, obj := range resp.Data {
+		if obj.Data != nil && obj.Data.ObjectId != "" {
+			log.Printf("[sui] found existing AgentCertificate: %s", obj.Data.ObjectId)
+			return obj.Data.ObjectId, nil
+		}
+	}
+
+	// 2. No cert found — self-register as agent (permissionless)
+	log.Printf("[sui] no AgentCertificate found, registering as agent in org %s...", c.orgID)
+	err = c.executeProtocolCall(ctx, "entry", "register_agent", []interface{}{
+		c.orgID,
+		[]string{"envd-node"},
+	})
+	if err != nil {
+		return "", fmt.Errorf("register agent: %w", err)
+	}
+
+	// 3. Query again to find newly created cert
+	resp, err = c.rpc.SuiXGetOwnedObjects(ctx, models.SuiXGetOwnedObjectsRequest{
+		Address: c.keypair.Address(),
+		Query: models.SuiObjectResponseQuery{
+			Filter:  models.ObjectFilterByStructType{StructType: certType},
+			Options: models.SuiObjectDataOptions{ShowType: true},
+		},
+		Limit: 10,
+	})
+	if err != nil {
+		return "", fmt.Errorf("query cert after registration: %w", err)
+	}
+
+	for _, obj := range resp.Data {
+		if obj.Data != nil && obj.Data.ObjectId != "" {
+			log.Printf("[sui] registered agent, cert: %s", obj.Data.ObjectId)
+			return obj.Data.ObjectId, nil
+		}
+	}
+
+	return "", fmt.Errorf("no AgentCertificate found after registration")
+}
+
+// executeProtocolCall builds, signs, and executes a Move call on the protocol package.
+func (c *Client) executeProtocolCall(ctx context.Context, module, function string, args []interface{}) error {
+	if c.sponsor != nil {
+		req := SponsorRequest{
+			Sender:    c.keypair.Address(),
+			PackageID: c.protocolPackageID,
+			Module:    module,
+			Function:  function,
+			TypeArgs:  []interface{}{},
+			Args:      args,
+		}
+		resp, err := c.sponsor.RequestSponsorship(ctx, req)
+		if err != nil {
+			return fmt.Errorf("sponsor request: %w", err)
+		}
+		txnMeta := models.TxnMetaData{TxBytes: resp.TxBytes}
+		signed := txnMeta.SignSerializedSigWith(c.keypair.Private)
+		_, err = c.rpc.SuiExecuteTransactionBlock(ctx, models.SuiExecuteTransactionBlockRequest{
+			TxBytes:   resp.TxBytes,
+			Signature: []string{resp.SponsorSignature, signed.Signature},
+			Options: models.SuiTransactionBlockOptions{
+				ShowEffects: true,
+				ShowEvents:  true,
+			},
+			RequestType: "WaitForLocalExecution",
+		})
+		if err != nil {
+			return fmt.Errorf("execute sponsored tx: %w", err)
+		}
+		return nil
+	}
+
+	txn, err := c.rpc.MoveCall(ctx, models.MoveCallRequest{
+		Signer:          c.keypair.Address(),
+		PackageObjectId: c.protocolPackageID,
+		Module:          module,
+		Function:        function,
+		TypeArguments:   []interface{}{},
+		Arguments:       args,
+		GasBudget:       "10000000",
+	})
+	if err != nil {
+		return fmt.Errorf("build tx: %w", err)
+	}
+
+	_, err = c.rpc.SignAndExecuteTransactionBlock(ctx, models.SignAndExecuteTransactionBlockRequest{
+		TxnMetaData: txn,
+		PriKey:      c.keypair.Private,
+		Options: models.SuiTransactionBlockOptions{
+			ShowEffects: true,
+			ShowEvents:  true,
+		},
+		RequestType: "WaitForLocalExecution",
+	})
+	if err != nil {
+		return fmt.Errorf("execute tx: %w", err)
+	}
+
 	return nil
 }
 
