@@ -36,7 +36,7 @@ sui:
 # WireGuard P2P data plane
 wireguard:
   enabled: false
-  interface_name: wg0
+  interface_name: wg0                    # Linux: any name. macOS: must be utun[0-9]* (e.g. utun99)
   listen_port: 51820
   keypair_path: ~/.wireguard/envd.key # Curve25519 keypair (auto-generated if missing)
   # address: 10.100.X.Y/32            # Auto-assigned from SUI address hash if empty
@@ -45,6 +45,7 @@ wireguard:
 # Also used for role auto-detection: public IP → auto-enable relay + stun_server.
 stun:
   enabled: true                        # Recommended: always enable for NAT detection
+  bind_address: ""                     # Optional: bind STUN probes to this local IP (useful when VPN is active)
   servers:                             # Public STUN fallback (org/shared STUN discovered on-chain)
     - stun:stun.l.google.com:19302
     - stun:stun1.l.google.com:19302

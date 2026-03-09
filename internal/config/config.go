@@ -91,8 +91,9 @@ type WireGuardConfig struct {
 }
 
 type STUNConfig struct {
-	Enabled bool     `yaml:"enabled"`
-	Servers []string `yaml:"servers"`
+	Enabled     bool     `yaml:"enabled"`
+	Servers     []string `yaml:"servers"`
+	BindAddress string   `yaml:"bind_address"` // optional: bind STUN probes to this local address (useful when VPN is active)
 }
 
 // DefaultConfig returns a config with sensible defaults.
