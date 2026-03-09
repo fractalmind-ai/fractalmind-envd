@@ -134,9 +134,12 @@ func main() {
 			log.Fatalf("failed to create sui client: %v", err)
 		}
 
-		// Attach local sponsor for self-sponsorship (org mode)
+		// Gas top-up: sponsor wallet funds envd node for direct SUI execution
 		if sponsorSvc != nil {
-			suiClient.SetSponsor(&localSponsor{svc: sponsorSvc})
+			ctx := context.Background()
+			if err := sponsorSvc.TransferGas(ctx, suiClient.Address(), 50_000_000); err != nil {
+				log.Printf("[sui] gas top-up failed: %v (will retry with direct gas)", err)
+			}
 		}
 
 		// Register peer on-chain
@@ -445,13 +448,4 @@ func handleCommand(cmd ws.CommandPayload, scanner *agent.Scanner, cfg *config.Co
 
 	log.Printf("[cmd] %s result: success=%v", cmd.Command, result["success"])
 	return result
-}
-
-// localSponsor wraps sponsor.Service for in-process self-sponsorship.
-type localSponsor struct {
-	svc *sponsor.Service
-}
-
-func (ls *localSponsor) RequestSponsorship(ctx context.Context, req sui.SponsorRequest) (*sui.SponsorResponse, error) {
-	return ls.svc.HandleRequest(ctx, req)
 }

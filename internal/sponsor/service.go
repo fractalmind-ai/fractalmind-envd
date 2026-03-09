@@ -139,6 +139,40 @@ func (s *Service) Address() string {
 	return s.keypair.Address()
 }
 
+// TransferGas sends SUI from the sponsor wallet to the given recipient.
+// Used to fund worker nodes so they can pay their own gas.
+func (s *Service) TransferGas(ctx context.Context, recipient string, amount uint64) error {
+	gasCoinID, err := s.findGasCoin(ctx)
+	if err != nil {
+		return fmt.Errorf("find gas coin: %w", err)
+	}
+
+	txn, err := s.rpc.TransferSui(ctx, models.TransferSuiRequest{
+		Signer:      s.keypair.Address(),
+		SuiObjectId: gasCoinID,
+		GasBudget:   "10000000",
+		Recipient:   recipient,
+		Amount:      fmt.Sprintf("%d", amount),
+	})
+	if err != nil {
+		return fmt.Errorf("build transfer: %w", err)
+	}
+
+	signed := txn.SignSerializedSigWith(ed25519.PrivateKey(s.keypair.Private))
+	_, err = s.rpc.SuiExecuteTransactionBlock(ctx, models.SuiExecuteTransactionBlockRequest{
+		TxBytes:     signed.TxBytes,
+		Signature:   []string{signed.Signature},
+		Options:     models.SuiTransactionBlockOptions{ShowEffects: true},
+		RequestType: "WaitForLocalExecution",
+	})
+	if err != nil {
+		return fmt.Errorf("execute transfer: %w", err)
+	}
+
+	log.Printf("[sponsor] transferred %d MIST to %s", amount, truncate(recipient, 10))
+	return nil
+}
+
 // DailyUsage returns the current daily gas usage.
 func (s *Service) DailyUsage() (used, limit uint64) {
 	s.mu.Lock()
