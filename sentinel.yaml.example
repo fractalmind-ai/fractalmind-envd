@@ -70,6 +70,15 @@ relay:
   region: ""                           # Geographic region (e.g. "cn-east", "us-west")
   isp: ""                              # Network provider (e.g. "aliyun", "aws")
 
+  # TCP fallback: WSS relay for UDP-restricted networks (Issue #8).
+  # When STUN fails and UDP is completely blocked (e.g., corporate firewall),
+  # envd auto-activates WSS fallback to relay WireGuard traffic over TCP/443.
+  tcp_fallback: false                  # Set true to enable WSS fallback detection
+  relay_url: ""                        # WSS relay endpoint (e.g., "wss://relay.example.com/wg-relay")
+  wss_listen_port: 443                 # WSS server port (relay nodes only)
+  wss_port_min: 51900                  # UDP port pool start for WSS relay allocations
+  wss_port_max: 51999                  # UDP port pool end for WSS relay allocations
+
 # Legacy: Gateway WebSocket (kept for backwards-compatibility, not used in v3 P2P mode)
 gateway:
   url: ws://localhost:8080/ws

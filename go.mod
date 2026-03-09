@@ -6,9 +6,11 @@ require (
 	github.com/block-vision/sui-go-sdk v1.1.4
 	github.com/gorilla/websocket v1.5.3
 	github.com/pion/stun/v3 v3.1.1
+	github.com/pion/turn/v4 v4.1.4
 	golang.org/x/crypto v0.48.0
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
 	gopkg.in/yaml.v3 v3.0.1
+	nhooyr.io/websocket v1.8.17
 )
 
 require (
@@ -26,7 +28,6 @@ require (
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/transport/v4 v4.0.1 // indirect
-	github.com/pion/turn/v4 v4.1.4 // indirect
 	github.com/tidwall/gjson v1.14.4 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
