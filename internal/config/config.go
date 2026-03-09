@@ -53,14 +53,15 @@ type HeartbeatConfig struct {
 }
 
 type SUIConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	RPC          string `yaml:"rpc"`
-	KeypairPath  string `yaml:"keypair_path"`
-	PackageID    string `yaml:"package_id"`
-	RegistryID   string `yaml:"registry_id"`
-	OrgID        string `yaml:"org_id"`
-	CertID       string `yaml:"cert_id"`
-	PollInterval string `yaml:"poll_interval"`
+	Enabled           bool   `yaml:"enabled"`
+	RPC               string `yaml:"rpc"`
+	KeypairPath       string `yaml:"keypair_path"`
+	PackageID         string `yaml:"package_id"`
+	ProtocolPackageID string `yaml:"protocol_package_id"`
+	RegistryID        string `yaml:"registry_id"`
+	OrgID             string `yaml:"org_id"`
+	CertID            string `yaml:"cert_id"`
+	PollInterval      string `yaml:"poll_interval"`
 }
 
 // SponsorConfig configures the built-in gas sponsorship role.

@@ -28,9 +28,10 @@ sui:
   rpc: https://fullnode.testnet.sui.io:443
   keypair_path: ~/.sui/envd.key       # Ed25519 keypair (auto-generated if missing)
   package_id: "0x..."                 # fractalmind_envd package on SUI
+  protocol_package_id: "0x..."       # fractalmind_protocol package (for auto agent cert discovery)
   registry_id: "0x..."                # PeerRegistry shared object ID
   org_id: "0x..."                     # Organization object ID
-  cert_id: "0x..."                    # AgentCertificate object ID
+  cert_id: ""                         # AgentCertificate object ID (auto-discovered if empty)
   poll_interval: 30s                  # How often to poll for new peer events
 
 # WireGuard P2P data plane

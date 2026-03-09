@@ -77,7 +77,7 @@ func main() {
 	var suiClient *sui.Client
 	var wgManager *wg.Manager
 	var suiPollTicker *time.Ticker
-	var eventCursor string
+	var eventCursor interface{}
 
 	if cfg.SUI.Enabled {
 		// --- WireGuard init (optional, graceful degradation) ---
