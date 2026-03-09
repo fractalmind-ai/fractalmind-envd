@@ -30,7 +30,7 @@ type Client struct {
 	registryID        string
 	orgID             string
 	certID            string
-	sponsor           *SponsorClient
+	sponsor           SponsorProvider
 }
 
 // NewClient creates a SUI client from config.
@@ -75,10 +75,10 @@ func (c *Client) Address() string {
 	return c.keypair.Address()
 }
 
-// SetSponsor attaches a sponsor client for gas sponsorship.
-func (c *Client) SetSponsor(sc *SponsorClient) {
-	c.sponsor = sc
-	log.Printf("[sui] sponsor client attached")
+// SetSponsor attaches a sponsor provider for gas sponsorship.
+func (c *Client) SetSponsor(sp SponsorProvider) {
+	c.sponsor = sp
+	log.Printf("[sui] sponsor attached")
 }
 
 // RegisterPeer registers this node on-chain with its WireGuard public key and endpoints.

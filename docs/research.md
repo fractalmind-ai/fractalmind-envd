@@ -545,6 +545,399 @@ fractalmind_protocol = "0x685d6fb6ed8b0e679bb467ea73111819ec6ff68b1466d24ca26b40
 
 ---
 
+## Relay Architecture (v3 — 2026-03-08 Elliot 评审)
+
+> 背景: 纯 WireGuard P2P 在双 symmetric NAT 场景下无法直连。需要 Relay 兜底。
+> Elliot 评审要点:
+> 1. 有公网 IP 的 envd 自动注册为 Relay + TURN
+> 2. Relay 分组织级和共享级, 组织 Relay 优先
+> 3. 链上合约提供智能 Relay 选择 (top 5)
+> 4. Gas 代付按组织钱包, 不走全局池
+
+### Relay 分层模型
+
+```
+连接优先级 (从快到慢):
+  1. WireGuard P2P 直连 (STUN hole punching)
+  2. 组织 Relay (同组织的公网 IP 节点)
+  3. 共享 Relay (公共 relay 节点, 服务所有组织)
+```
+
+**Relay 类型:**
+
+| 类型 | 归属 | 服务范围 | Gas 代付 | 注册方式 |
+|------|------|---------|---------|---------|
+| 组织 Relay | 组织内 envd 节点 | 仅本组织 peer | 组织钱包 | envd 启动时自动检测公网 IP → 自动注册 |
+| 共享 Relay | 独立运行的公共节点 | 所有组织 | SponsorRegistry (全局池) | 手动注册 |
+
+### 自动 Relay 检测
+
+envd 启动时通过 STUN 探测 NAT 类型:
+
+```
+envd 启动:
+  1. STUN 探测 → 获取 NAT 类型
+  2. if NAT type == none (有公网 IP):
+       → 自动启用 Relay + TURN 模式
+       → 注册到链上: is_relay=true, relay_addr=公网IP:port
+       → 开始接受其他 peer 的 relay 请求
+  3. if NAT type != none (在 NAT 后):
+       → 普通 peer 模式
+       → 优先 WireGuard 直连
+       → 失败时查链上 relay 列表 → 通过 relay 转发
+```
+
+### 链上 Relay 注册 — PeerRegistry 扩展
+
+PeerNode struct 新增 relay 相关字段:
+
+```move
+public struct PeerNode has store, drop {
+    // ... 现有字段 ...
+    org_id: ID,
+    wireguard_pubkey: vector<u8>,
+    endpoints: vector<String>,
+    hostname: String,
+    status: u8,
+
+    // ===== Relay 扩展字段 =====
+    /// 是否作为 relay 节点
+    is_relay: bool,
+    /// Relay 公网地址 (仅 is_relay=true 时有值)
+    relay_addr: String,
+    /// 地理区域 (如 "cn-east", "us-west", "eu-central")
+    region: String,
+    /// 运营商/网络标识 (如 "aliyun", "aws", "telecom")
+    isp: String,
+    /// Relay 最大连接容量
+    relay_capacity: u64,
+    /// 当前连接数 (定期更新)
+    relay_current_load: u64,
+    /// 平均延迟 ms (peer 上报聚合)
+    avg_latency_ms: u64,
+    /// 可用性评分 (0-100, 基于 uptime 和服务质量)
+    uptime_score: u64,
+}
+```
+
+新增事件:
+
+```move
+/// Relay 节点注册/更新
+public struct RelayRegistered has copy, drop {
+    peer: address,
+    org_id: ID,
+    relay_addr: String,
+    region: String,
+    isp: String,
+    relay_capacity: u64,
+}
+
+/// Relay 负载更新 (定期上报)
+public struct RelayLoadUpdated has copy, drop {
+    peer: address,
+    current_load: u64,
+    avg_latency_ms: u64,
+    uptime_score: u64,
+}
+```
+
+### 智能 Relay 选择合约
+
+链上提供合约方法, 返回最合适的 5 个 relay:
+
+```move
+/// 为指定 peer 选择最佳 relay 列表
+/// 选择算法:
+///   1. 同组织 relay 优先 (权重 +100)
+///   2. 同地理区域优先 (权重 +50)
+///   3. 同运营商优先 (权重 +30)
+///   4. 低延迟优先 (权重 +20, 按 avg_latency_ms 排序)
+///   5. 低负载优先 (权重 +10, 按 current_load/capacity 排序)
+///   6. 高 uptime 优先 (权重 +10)
+///
+/// 返回排序后 top N relay
+public fun get_best_relays(
+    registry: &PeerRegistry,
+    peer_addr: address,
+    count: u64,
+): vector<RelayInfo> {
+    // 1. 获取 peer 的 org_id, region, isp
+    // 2. 遍历所有 is_relay=true && status=online 的节点
+    // 3. 按权重评分排序
+    // 4. 返回 top N
+}
+
+public struct RelayInfo has copy, drop {
+    relay_addr: String,
+    peer_addr: address,
+    org_id: ID,
+    region: String,
+    isp: String,
+    capacity: u64,
+    current_load: u64,
+    avg_latency_ms: u64,
+    uptime_score: u64,
+    score: u64,  // 综合评分
+}
+```
+
+> **实现注意**: SUI Move 不支持遍历 Table。实际实现需要:
+> - 方案 A: 维护一个 `relay_list: vector<address>` 存储所有 relay 地址, `get_best_relays` 遍历此 vector
+> - 方案 B: 链下查询 RelayRegistered 事件, 在 envd 客户端做排序 (更灵活, 推荐)
+> - 方案 C: 混合 — 链上存 relay_list, 链下做复杂排序, 链上只做简单过滤
+
+### 客户端连接流程 (完整)
+
+```
+envd peer 需要连接另一个 peer:
+  1. 尝试 WireGuard P2P 直连 (STUN hole punching)
+  2. 直连成功 → 完成
+  3. 直连失败 → 查询链上 relay:
+     a. 调用 get_best_relays(my_addr, 5) 或 查询 RelayRegistered 事件
+     b. 获取 top 5 relay (优先组织 relay)
+     c. 按 score 排序依次尝试连接
+  4. relay 连接成功 → 通过 relay 转发 WireGuard 加密包
+  5. 所有 relay 失败 → 标记连接失败, 通知告警
+```
+
+### Gas 代付: 组织钱包模型
+
+> Elliot 评审修正: Gas 代付默认按组织来, 同组织的 envd 使用组织的钱包代付。
+
+```
+Gas 代付层级:
+  1. 组织钱包 (默认): 组织内 envd 的链上操作由组织统一代付
+  2. SponsorRegistry (全局池): 无组织的 peer 首次注册时使用 (bootstrap)
+  3. 自付: Worker 节点自己持有 SUI (fallback)
+
+组织 Relay 激励:
+  - 组织内 relay 节点的 Gas 由组织钱包优先代付
+  - relay 运营成本 = 0 (Gas 由组织承担)
+  - 提供 relay 服务 → 提升链上 uptime_score → 声誉积累
+```
+
+**组织钱包代付流程:**
+
+```
+envd (组织内节点)                 Org Gas Wallet (admin 运营)
+├── 构造 TX (register_peer等)     ├── 验证 sender 在本组织内
+├── 用自己的 keypair 签名          ├── 检查组织 Gas 预算
+├── 发送 partial-signed TX ──►   ├── 添加 org gas coin + budget
+│   (via WireGuard P2P)          ├── 用 org wallet keypair 签名
+│                                ├── 提交 dual-signed TX 到 SUI
+└── 收到 TX digest 确认 ◄────── └── 返回结果
+```
+
+### Relay 激励机制
+
+组合方案: **Gas 代付豁免 + 声誉积分**
+
+| 激励 | 机制 | 说明 |
+|------|------|------|
+| Gas 代付豁免 | 组织钱包代付 | Relay 节点链上操作 Gas 由组织承担, 运营零成本 |
+| 声誉积分 | 链上记录 | uptime_score + bytes_relayed 作为声誉指标 |
+| 优先级 | 链上排序 | 高声誉 relay 在 get_best_relays 中排名更高 |
+| 未来扩展 | Token 激励 | 可升级为按流量/连接数发放 token 奖励 |
+
+### relay_load 不上链 (P2P 广播)
+
+> Elliot 确认: relay_load 走 P2P, 不上链。只有 uptime_score 定期上链。
+
+**原因**: relay_load (current_load + avg_latency_ms) 变化频繁, 每小时上链会成为 Gas 主要开销 (占 83%)。
+
+**方案**: relay 节点在 P2P 心跳中携带 load 信息, peer 在本地缓存各 relay 的实时负载:
+
+```
+P2P 心跳包 (每 30s, 走 WireGuard):
+{
+  "type": "heartbeat",
+  "relay_load": {           // 仅 relay 节点携带
+    "current_load": 15,
+    "capacity": 100,
+    "avg_latency_ms": 23
+  }
+}
+```
+
+链上仅存储低频指标:
+- `uptime_score`: 每天更新一次 (基于 P2P 心跳可达率计算)
+- `region`, `isp`: 注册时设置, 极少变更
+
+**Gas 节省**: 2 节点 $1.10 → $0.19/月, 100 节点 $9.71 → $8.19/月
+
+---
+
+## Sponsor 合并到 envd (v3 — 2026-03-08)
+
+> Elliot 评审: 代付服务合并到 envd 组件内, 废弃独立 cmd/sponsor-service。
+
+### 设计
+
+envd 新增 `sponsor` 角色。有 org wallet keypair 的节点启用后, 通过内置 REST API 接收代付请求:
+
+```
+envd 角色矩阵:
+  worker:      普通节点, Agent 管理
+  coordinator: worker + REST API 管理接口
+  relay:       worker + 流量转发 + STUN Server (公网IP自动启用)
+  sponsor:     worker + Gas 代付 (需 org wallet keypair)
+```
+
+### Config
+
+```yaml
+# sentinel.yaml
+roles:
+  coordinator: true   # 手动启用
+  sponsor: true       # 手动启用
+  # relay + stun: 自动检测, 有公网 IP 自动启用
+
+sponsor:
+  org_wallet_path: ~/.sui/org-wallet.key  # 组织钱包私钥
+  max_gas_per_tx: 10000000   # 单笔上限 (MIST)
+  daily_gas_limit: 100000000  # 每日上限
+  allowed_packages:           # 白名单 (仅允许 envd 合约调用)
+    - "0x74aef8ff3bb0da5d5626780e6c0e5f1f36308a40580e519920fdc9204e73d958"
+```
+
+### 代付流程 (全部走 WireGuard)
+
+```
+worker envd ──WireGuard──► sponsor envd (/api/sponsor)
+  1. 构造 TX                 1. 验证 sender 在本组织内
+  2. 用自己 keypair 签名      2. 检查白名单 (目标合约)
+  3. POST /api/sponsor       3. 检查限额 (单笔 + 每日)
+     {partial_signed_tx}     4. 添加 org gas coin + budget
+                             5. 用 org wallet keypair co-sign
+  4. 收到 tx_digest ◄─────── 6. 提交 dual-signed TX 到 SUI
+```
+
+### 废弃组件
+
+- `cmd/sponsor-service/` — 功能全部迁入 envd sponsor 角色
+- 现有 PR #3 (Sponsor Service) 的代码可复用, 只是从独立 HTTP server 改为 envd 内部模块
+
+---
+
+## STUN Server 合并到 envd (v3 — 2026-03-08)
+
+> Elliot 评审: STUN Server 合并到 envd, 公网 IP 自动启用。fallback 机制与 Relay 对称。
+
+### 设计
+
+当前 envd 只有 STUN Client (向外部 STUN server 探测公网 IP)。v3 新增 STUN Server — 有公网 IP 的节点自动提供 STUN 服务。
+
+```
+公网 IP 的 envd 节点:
+  :3478 — STUN Server + Relay (同端口, 协议自动区分)
+
+链上注册: is_relay=true (隐含 STUN 服务可用)
+```
+
+### STUN 分层 fallback (与 Relay 对称)
+
+```
+STUN 优先级:                     Relay 优先级:
+  1. 组织 STUN (同组织公网节点)     1. 组织 Relay
+  2. 共享 STUN (其他组织公网节点)    2. 共享 Relay
+  3. 公共 STUN (Google/Cloudflare)  3. (连接失败)
+```
+
+区别: STUN 多一层公共 fallback, 因为 STUN 是无状态标准协议, 用公共服务无安全风险 (仅探测 IP, 不传数据)。
+
+### STUN 发现流程
+
+```
+envd 需要探测自己的公网 endpoint:
+  1. 查链上 relay 列表 (is_relay=true 的都提供 STUN 服务)
+  2. 按优先级排序: 同组织 > 共享 > 公共
+  3. 依次尝试 STUN 探测
+  4. 任一成功 → 获得公网 IP:port → 用于 WireGuard 直连
+  5. 全部失败 (极端情况) → 跳过直连, 直接走 Relay
+```
+
+### 实现
+
+Go `pion/stun` 库, ~100 行集成代码:
+
+```go
+// envd 启动时 (relay.go)
+if natType == NATNone { // 有公网 IP
+    // 启动 STUN + Relay 复合服务
+    listener, _ := net.ListenPacket("udp", ":3478")
+
+    stunServer := stun.NewServer(stun.Config{
+        Conn: listener,
+    })
+
+    relayServer := relay.NewServer(relay.Config{
+        Conn:        listener,
+        AuthHandler: orgMemberAuth,
+        MaxConns:    cfg.Relay.MaxConnections,
+        BwLimit:     cfg.Relay.BandwidthLimit,
+    })
+
+    go stunServer.Start()
+    go relayServer.Start()
+
+    // 注册到链上
+    registerAsRelay(suiClient, publicIP, region, isp)
+}
+```
+
+---
+
+## 最终架构 (v3)
+
+> envd = 唯一组件, 外部依赖仅 SUI RPC
+
+```
+fractalmind-envd (单一 Go 二进制)
+├── Agent Manager:   tmux 扫描 + 崩溃检测 + 自动重启 (≤60s, max 3)
+├── WireGuard:       P2P mesh 隧道 (数据平面)
+├── SUI Client:      链上注册 / peer 发现 / 事件订阅 (控制平面)
+├── STUN Client:     NAT 类型探测 (优先组织 STUN → 共享 → 公共)
+├── STUN Server:     NAT 探测服务 (公网 IP 自动启用)
+├── Relay Server:    WireGuard 包转发 (公网 IP 自动启用)
+├── Sponsor:         组织 Gas 代付 (需 org wallet, 手动启用)
+├── REST API:        管理接口 (coordinator 角色, 手动启用)
+└── P2P Heartbeat:   节点间心跳 + relay_load 广播
+
+角色自动检测:
+  公网 IP → 自动启用 STUN Server + Relay Server
+  有 org wallet → 启用 Sponsor
+  coordinator=true → 启用 REST API
+
+外部依赖: SUI RPC (公共全节点, 如 fullnode.mainnet.sui.io)
+独立组件: 0 个
+废弃组件: cmd/sponsor-service (合并到 envd sponsor 角色)
+```
+
+### 连接全流程
+
+```
+envd A (NAT 后) 要连接 envd B (NAT 后):
+
+1. STUN 探测:
+   A → 组织 STUN → 获取 A 公网 endpoint
+   B → 组织 STUN → 获取 B 公网 endpoint
+
+2. 尝试 WireGuard 直连:
+   A ←→ B (UDP hole punching via 公网 endpoints)
+   成功 → 完成
+
+3. 直连失败 → Relay fallback:
+   查链上 relay 列表 → get_best_relays(A, 5)
+   → 优先组织 Relay → 共享 Relay
+   A → Relay → B (WireGuard 加密包转发, Relay 看不到明文)
+
+4. Gas (全程):
+   链上操作 → envd 构造 TX → 组织 sponsor envd co-sign → SUI
+```
+
+---
+
 ## 技术选型结论
 
 | 组件 | 选型 | 理由 |
@@ -552,12 +945,15 @@ fractalmind_protocol = "0x685d6fb6ed8b0e679bb467ea73111819ec6ff68b1466d24ca26b40
 | **envd daemon** | Go | 单二进制, 交叉编译, 内嵌 WireGuard |
 | **控制平面** | SUI 区块链 | 去中心化 peer 发现, 身份, 权限 |
 | **数据平面** | WireGuard P2P | 吸收 Tailscale 最大优势 |
-| **NAT 穿透** | STUN + ICE | 无状态, 非信任点 |
-| **Relay 兜底** | TURN (可选) | P2P 失败时中转, 无状态 |
+| **NAT 穿透** | STUN (内置) | 公网 IP 节点自动提供 STUN Server |
+| **Relay 兜底** | 内置 Relay | 公网 IP 节点自动启用, 分层选择 |
+| **Gas 代付** | 内置 Sponsor | 组织钱包代付, 废弃独立服务 |
 | **Peer 发现** | SUI Events | PeerRegistered 事件驱动 |
 | **认证** | SUI keypair Ed25519 | AgentCertificate 链上验证 |
 | **Agent 发现** | tmux session 扫描 | 与现有部署方式一致 |
 | **合约** | `fractalmind_envd::peer` | 独立 package, 依赖现有 protocol |
+| **STUN 库** | `pion/stun` (Go) | WebRTC 生态标准库 |
+| **Relay 库** | `pion/turn` (Go) | 成熟 TURN/Relay 实现 |
 
 ---
 
@@ -578,33 +974,40 @@ SUI Gas 费用 = **RGP × CU + SP × SU - SR**
 
 | 操作 | CU 估计 | 存储 | 总 Gas (SUI) | 说明 |
 |------|---------|------|-------------|------|
-| `register_peer` | ~2,000 | ~1KB (new Table entry) | **~0.0017** | 首次注册, 含存储费 |
+| `register_peer` (含 relay 字段) | ~2,500 | ~1.5KB (new Table entry) | **~0.0022** | 首次注册, 含 relay 扩展字段 |
 | `update_endpoints` | ~1,500 | 0 (修改现有) | **~0.0011** | IP 漂移更新, 无新存储 |
 | `go_offline` | ~1,000 | 0 | **~0.0008** | 状态变更 |
 | `go_online` | ~1,500 | 0 | **~0.0011** | 状态 + endpoint 更新 |
 | `deregister_peer` | ~1,000 | 负 (删除) | **~0.0003** | 删除退还存储费 |
+| `update_uptime_score` | ~1,200 | 0 | **~0.0009** | 声誉分更新 (每天) |
+| `enable_sponsor` | ~2,000 | ~0.5KB | **~0.0015** | 组织启用代付 (一次性) |
+
+> **relay_load 不上链** — current_load + avg_latency_ms 通过 P2P 心跳广播, 不消耗 Gas。
 
 ### 月度成本估算
 
-**场景: 2 节点 (本机 + RoseX)**
+**场景: 2 节点 (本机 + RoseX), 1 个有公网 IP 做 relay**
 
 | 操作 | 频率 | 次/月 | 单价 (SUI) | 月费 (SUI) |
 |------|------|-------|-----------|-----------|
-| register_peer | 启动时 | 30 (日重启) | 0.0017 | 0.051 |
+| register_peer (含 relay) | 启动时 | 30 (日重启) | 0.0022 | 0.066 |
 | update_endpoints | IP 变化 | 10 | 0.0011 | 0.011 |
 | go_offline/online | 每次重启 | 60 | 0.001 | 0.060 |
-| **合计** | | | | **~0.122 SUI** |
+| update_uptime_score | 每天 (relay) | 30 | 0.0009 | 0.027 |
+| enable_sponsor | 一次性 | 1 | 0.0015 | 0.002 |
+| **合计** | | | | **~0.166 SUI** |
 
-> 按 SUI ≈ $1.15 计算: **~$0.14/月** (2 节点)
+> 按 SUI ≈ $1.15 计算: **~$0.19/月** (2 节点, relay_load 走 P2P)
 
-**场景: 100 节点 (中型团队)**
+**场景: 100 节点 (中型团队, 10 个 relay)**
 
 | 操作 | 频率 | 次/月 | 月费 (SUI) |
 |------|------|-------|-----------|
-| register_peer | 启动时 | 1,500 | 2.55 |
+| register_peer | 启动时 | 1,500 | 3.30 |
 | update_endpoints | IP 变化 | 500 | 0.55 |
 | go_offline/online | 重启 | 3,000 | 3.00 |
-| **合计** | | | **~6.10 SUI ≈ $7.13/月** |
+| update_uptime_score | 每天 (10 relay) | 300 | 0.27 |
+| **合计** | | | **~7.12 SUI ≈ $8.19/月** |
 
 ### 心跳不上链的验证
 
@@ -624,9 +1027,9 @@ SUI Gas 费用 = **RGP × CU + SP × SU - SR**
 | Tailscale Team | $12 | $600 | 中心化 SaaS |
 | TeamViewer Business | $101.80 | N/A (per-user) | 中心化 SaaS |
 | ToDesk 专业版 | ¥50 (~$7) | N/A | 中心化 SaaS |
-| **fractalmind-envd** | **$0.14** | **$7.13** | **去中心化链上** |
+| **fractalmind-envd** | **$0.19** | **$8.19** | **去中心化链上** |
 
-> fractalmind-envd 比 Tailscale Team 便宜 **~85x**, 同时实现去中心化。
+> fractalmind-envd 比 Tailscale Team 便宜 **~63x** (2 节点) / **~73x** (100 节点)，同时实现去中心化 + 零独立组件。
 
 ---
 
@@ -887,10 +1290,13 @@ else:
 
 > 目标: 处理 NAT 穿透失败场景, 保证 100% 连通
 
-- TURN Relay 服务 (无状态, 仅转发加密 WireGuard 包)
-- 连接策略: WireGuard P2P → STUN 重试 → TURN Relay 兜底
-- endpoint 自动更新: IP 漂移检测 → update_endpoints 上链
-- Gas Sponsor Service (轻量 HTTP, 可选, 企业部署)
+- 公网 IP 节点自动注册为 Relay + TURN (STUN 检测 NAT type)
+- PeerRegistry 扩展: is_relay, relay_addr, region, isp, capacity, load, latency, uptime_score
+- 分层 Relay: 组织 Relay 优先 → 共享 Relay fallback
+- 链上智能选择: get_best_relays() 返回 top 5 (组织匹配 > 地理 > 运营商 > 延迟 > 负载)
+- Gas 代付: 组织钱包统一代付 (非全局池)
+- Relay 激励: Gas 豁免 + 声誉积分 + 未来 token 扩展
+- 连接策略: WireGuard P2P → 组织 Relay → 共享 Relay
 
 ### Phase 5: 双机部署 + 故障自愈
 

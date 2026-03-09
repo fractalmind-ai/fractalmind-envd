@@ -65,6 +65,22 @@ func main() {
 	// ======= v3: Resolve active roles =======
 	activeRoles := roles.Resolve(cfg)
 
+	// Initialize sponsor service early (needed for SUI self-sponsorship)
+	var sponsorSvc *sponsor.Service
+	if activeRoles.Sponsor {
+		sponsorSvc, err = sponsor.NewService(sponsor.Config{
+			SUI_RPC:         cfg.SUI.RPC,
+			OrgWalletPath:   cfg.Sponsor.OrgWalletPath,
+			AllowedPackages: cfg.Sponsor.AllowedPackages,
+			MaxGasPerTx:     cfg.Sponsor.MaxGasPerTx,
+			DailyGasLimit:   cfg.Sponsor.DailyGasLimit,
+		})
+		if err != nil {
+			log.Fatalf("[sponsor] failed to start: %v", err)
+		}
+		log.Printf("[sponsor] sponsor role enabled (wallet=%s, address=%s)", cfg.Sponsor.OrgWalletPath, sponsorSvc.Address())
+	}
+
 	// Initialize components
 	scanner := agent.NewScanner(cfg.Agents.ScanMethod)
 	wsClient := ws.NewClient(cfg.Gateway.URL, reconnectWait)
@@ -116,6 +132,11 @@ func main() {
 		suiClient, err = sui.NewClient(cfg.SUI)
 		if err != nil {
 			log.Fatalf("failed to create sui client: %v", err)
+		}
+
+		// Attach local sponsor for self-sponsorship (org mode)
+		if sponsorSvc != nil {
+			suiClient.SetSponsor(&localSponsor{svc: sponsorSvc})
 		}
 
 		// Register peer on-chain
@@ -171,21 +192,6 @@ func main() {
 			log.Fatalf("[stun-server] failed to start: %v", err)
 		}
 		log.Printf("[stun-server] STUN server enabled on :%d", cfg.Relay.ListenPort)
-	}
-
-	if activeRoles.Sponsor {
-		sponsorSvc, err := sponsor.NewService(sponsor.Config{
-			SUI_RPC:         cfg.SUI.RPC,
-			OrgWalletPath:   cfg.Sponsor.OrgWalletPath,
-			AllowedPackages: cfg.Sponsor.AllowedPackages,
-			MaxGasPerTx:     cfg.Sponsor.MaxGasPerTx,
-			DailyGasLimit:   cfg.Sponsor.DailyGasLimit,
-		})
-		if err != nil {
-			log.Fatalf("[sponsor] failed to start: %v", err)
-		}
-		log.Printf("[sponsor] sponsor role enabled (wallet=%s, address=%s)", cfg.Sponsor.OrgWalletPath, sponsorSvc.Address())
-		_ = sponsorSvc // Used by P2P message handler (wired in WireGuard integration)
 	}
 
 	if activeRoles.Coordinator {
@@ -439,4 +445,13 @@ func handleCommand(cmd ws.CommandPayload, scanner *agent.Scanner, cfg *config.Co
 
 	log.Printf("[cmd] %s result: success=%v", cmd.Command, result["success"])
 	return result
+}
+
+// localSponsor wraps sponsor.Service for in-process self-sponsorship.
+type localSponsor struct {
+	svc *sponsor.Service
+}
+
+func (ls *localSponsor) RequestSponsorship(ctx context.Context, req sui.SponsorRequest) (*sui.SponsorResponse, error) {
+	return ls.svc.HandleRequest(ctx, req)
 }

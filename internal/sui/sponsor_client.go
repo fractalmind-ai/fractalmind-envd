@@ -31,6 +31,11 @@ type SponsorErrorResponse struct {
 	Error string `json:"error"`
 }
 
+// SponsorProvider abstracts sponsorship — either local (in-process) or remote (HTTP).
+type SponsorProvider interface {
+	RequestSponsorship(ctx context.Context, req SponsorRequest) (*SponsorResponse, error)
+}
+
 // SponsorClient is an HTTP client for the Sponsor Service.
 type SponsorClient struct {
 	url    string
