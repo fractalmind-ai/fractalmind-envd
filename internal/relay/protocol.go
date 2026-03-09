@@ -10,15 +10,32 @@ import (
 // Data messages (WebSocket binary): [2-byte peer_id][WG packet]
 // Control messages (WebSocket text): JSON
 //
+// Auth handshake:
+//  1. Server sends challenge: {"type":"challenge","nonce":"<hex>"}
+//  2. Client signs nonce with Ed25519 key and responds:
+//     {"type":"auth","sui_address":"0x...","public_key":"<hex>","signature":"<hex>"}
+//  3. Server verifies: derive SUI address from public_key, check match, verify signature
+//
 // This keeps data path minimal (2 bytes overhead) while control
 // messages use human-readable JSON for debuggability.
+
+// Signer signs data with an Ed25519 keypair. Implemented by sui.Keypair.
+type Signer interface {
+	Sign(data []byte) []byte
+	PublicKeyBytes() []byte
+}
 
 // ControlMsg is a JSON control message sent over WebSocket text frames.
 type ControlMsg struct {
 	Type string `json:"type"`
 
+	// Challenge fields (relay → client)
+	Nonce string `json:"nonce,omitempty"` // hex-encoded random challenge
+
 	// Auth fields (client → relay)
 	SUiAddress string `json:"sui_address,omitempty"`
+	PublicKey  string `json:"public_key,omitempty"` // hex-encoded Ed25519 public key
+	Signature  string `json:"signature,omitempty"`  // hex-encoded Ed25519 signature of nonce
 
 	// Allocated fields (relay → client)
 	Endpoint string `json:"endpoint,omitempty"`
@@ -30,6 +47,7 @@ type ControlMsg struct {
 
 // Control message types.
 const (
+	MsgTypeChallenge  = "challenge"
 	MsgTypeAuth       = "auth"
 	MsgTypeAllocated  = "allocated"
 	MsgTypeAddPeer    = "add_peer"

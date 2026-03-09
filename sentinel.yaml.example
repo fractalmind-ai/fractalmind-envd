@@ -76,6 +76,8 @@ relay:
   tcp_fallback: false                  # Set true to enable WSS fallback detection
   relay_url: ""                        # WSS relay endpoint (e.g., "wss://relay.example.com/wg-relay")
   wss_listen_port: 443                 # WSS server port (relay nodes only)
+  wss_cert_file: ""                    # TLS cert file for direct TLS (optional: can use reverse proxy instead)
+  wss_key_file: ""                     # TLS key file for direct TLS (optional: can use reverse proxy instead)
   wss_port_min: 51900                  # UDP port pool start for WSS relay allocations
   wss_port_max: 51999                  # UDP port pool end for WSS relay allocations
 

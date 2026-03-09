@@ -2,6 +2,9 @@ package relay
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/blake2b"
 	"nhooyr.io/websocket"
 )
 
@@ -71,19 +75,39 @@ func (h *WSSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *WSSHandler) handleClient(ctx context.Context, conn *websocket.Conn) {
 	defer conn.CloseNow()
 
-	// Wait for auth message
+	// Step 1: Send challenge nonce
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		log.Printf("[wss-relay] generate nonce failed: %v", err)
+		return
+	}
+	nonceHex := hex.EncodeToString(nonce)
+
+	if err := h.writeControl(ctx, conn, ControlMsg{Type: MsgTypeChallenge, Nonce: nonceHex}); err != nil {
+		log.Printf("[wss-relay] send challenge failed: %v", err)
+		return
+	}
+
+	// Step 2: Wait for signed auth response
 	authMsg, err := h.readControl(ctx, conn)
 	if err != nil {
 		log.Printf("[wss-relay] auth read failed: %v", err)
 		return
 	}
-	if authMsg.Type != MsgTypeAuth || authMsg.SUiAddress == "" {
-		h.writeControl(ctx, conn, ControlMsg{Type: MsgTypeError, Endpoint: "auth required"})
+	if authMsg.Type != MsgTypeAuth || authMsg.SUiAddress == "" || authMsg.PublicKey == "" || authMsg.Signature == "" {
+		h.writeControl(ctx, conn, ControlMsg{Type: MsgTypeError, Endpoint: "auth required: sui_address, public_key, and signature fields"})
+		return
+	}
+
+	// Step 3: Verify signature and SUI address ownership
+	if err := verifyAuth(authMsg, nonce); err != nil {
+		log.Printf("[wss-relay] auth verification failed: %v", err)
+		h.writeControl(ctx, conn, ControlMsg{Type: MsgTypeError, Endpoint: fmt.Sprintf("auth failed: %v", err)})
 		return
 	}
 
 	suiAddr := authMsg.SUiAddress
-	log.Printf("[wss-relay] client connected: %s", suiAddr[:16])
+	log.Printf("[wss-relay] client authenticated: %s", suiAddr[:16])
 
 	// Allocate a UDP port for this client
 	alloc, err := h.allocate(suiAddr, conn)
@@ -146,6 +170,10 @@ func (h *WSSHandler) handleControl(ctx context.Context, conn *websocket.Conn, al
 
 	switch msg.Type {
 	case MsgTypeAddPeer:
+		if err := validateTarget(msg.Target); err != nil {
+			h.writeControl(ctx, conn, ControlMsg{Type: MsgTypeError, Endpoint: fmt.Sprintf("invalid target: %v", err)})
+			return
+		}
 		addr, err := net.ResolveUDPAddr("udp", msg.Target)
 		if err != nil {
 			h.writeControl(ctx, conn, ControlMsg{Type: MsgTypeError, Endpoint: fmt.Sprintf("bad target: %v", err)})
@@ -294,6 +322,68 @@ func (h *WSSHandler) writeControl(ctx context.Context, conn *websocket.Conn, msg
 		return err
 	}
 	return conn.Write(ctx, websocket.MessageText, data)
+}
+
+// verifyAuth verifies the client's Ed25519 signature and SUI address ownership.
+// The client must prove they own the SUI address by signing the challenge nonce
+// with the Ed25519 private key that derives the claimed address.
+func verifyAuth(msg ControlMsg, nonce []byte) error {
+	// Decode public key
+	pubKeyBytes, err := hex.DecodeString(msg.PublicKey)
+	if err != nil {
+		return fmt.Errorf("decode public_key: %w", err)
+	}
+	if len(pubKeyBytes) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid public key size: %d", len(pubKeyBytes))
+	}
+	pubKey := ed25519.PublicKey(pubKeyBytes)
+
+	// Decode signature
+	sigBytes, err := hex.DecodeString(msg.Signature)
+	if err != nil {
+		return fmt.Errorf("decode signature: %w", err)
+	}
+
+	// Verify Ed25519 signature over the original nonce bytes
+	if !ed25519.Verify(pubKey, nonce, sigBytes) {
+		return fmt.Errorf("signature verification failed")
+	}
+
+	// Derive SUI address from public key and verify it matches
+	// SUI address = 0x + hex(BLAKE2b-256(0x00 || pubkey))
+	payload := make([]byte, 1+len(pubKeyBytes))
+	payload[0] = 0x00 // Ed25519 scheme flag
+	copy(payload[1:], pubKeyBytes)
+	hash := blake2b.Sum256(payload)
+	derivedAddr := "0x" + hex.EncodeToString(hash[:])
+
+	if derivedAddr != msg.SUiAddress {
+		return fmt.Errorf("address mismatch: derived %s, claimed %s", derivedAddr[:16], msg.SUiAddress[:16])
+	}
+
+	return nil
+}
+
+// validateTarget rejects relay targets that would enable abuse.
+func validateTarget(target string) error {
+	host, _, err := net.SplitHostPort(target)
+	if err != nil {
+		return fmt.Errorf("invalid host:port: %w", err)
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("invalid IP address: %s", host)
+	}
+
+	if ip.IsLoopback() {
+		return fmt.Errorf("loopback addresses not allowed")
+	}
+	if ip.IsUnspecified() {
+		return fmt.Errorf("unspecified addresses not allowed")
+	}
+
+	return nil
 }
 
 // Close shuts down all active client connections.

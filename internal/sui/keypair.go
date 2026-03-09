@@ -83,3 +83,15 @@ func (kp *Keypair) Address() string {
 	hash := blake2b.Sum256(payload)
 	return "0x" + hex.EncodeToString(hash[:])
 }
+
+// Sign signs data with the Ed25519 private key.
+// Implements the relay.Signer interface.
+func (kp *Keypair) Sign(data []byte) []byte {
+	return ed25519.Sign(kp.Private, data)
+}
+
+// PublicKeyBytes returns the raw Ed25519 public key bytes.
+// Implements the relay.Signer interface.
+func (kp *Keypair) PublicKeyBytes() []byte {
+	return []byte(kp.Public)
+}
