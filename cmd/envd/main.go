@@ -79,25 +79,28 @@ func main() {
 	var suiPollTicker *time.Ticker
 	var eventCursor string
 
-	if cfg.SUI.Enabled && cfg.WireGuard.Enabled {
-		log.Printf("SUI + WireGuard integration enabled")
+	if cfg.SUI.Enabled {
+		// --- WireGuard init (optional, graceful degradation) ---
+		if cfg.WireGuard.Enabled {
+			log.Printf("SUI + WireGuard integration enabled")
 
-		// 1. Init WireGuard manager
-		wgClient, err := wgctrl.New()
-		if err != nil {
-			log.Fatalf("failed to create wgctrl client: %v", err)
+			wgClient, err := wgctrl.New()
+			if err != nil {
+				log.Printf("[wg] WARNING: failed to create wgctrl client: %v (continuing without WireGuard)", err)
+			} else {
+				wgManager, err = wg.NewManager(cfg.WireGuard, wgClient)
+				if err != nil {
+					log.Printf("[wg] WARNING: failed to create wg manager: %v (continuing without WireGuard)", err)
+				} else if err := wgManager.Setup(); err != nil {
+					log.Printf("[wg] WARNING: failed to setup wg interface: %v (continuing without WireGuard)", err)
+					wgManager = nil
+				}
+			}
+		} else {
+			log.Printf("SUI enabled (WireGuard disabled)")
 		}
 
-		wgManager, err = wg.NewManager(cfg.WireGuard, wgClient)
-		if err != nil {
-			log.Fatalf("failed to create wg manager: %v", err)
-		}
-
-		if err := wgManager.Setup(); err != nil {
-			log.Fatalf("failed to setup wg interface: %v", err)
-		}
-
-		// 2. Build endpoints list (use NAT detection result from role resolution)
+		// Build endpoints list (use NAT detection result from role resolution)
 		var endpoints []string
 		if activeRoles.PublicEndpoint != "" {
 			endpoints = append(endpoints, activeRoles.PublicEndpoint)
@@ -109,25 +112,31 @@ func main() {
 			endpoints = append(endpoints, fmt.Sprintf("0.0.0.0:%d", cfg.WireGuard.ListenPort))
 		}
 
-		// 3. Init SUI client
+		// Init SUI client (works independently of WireGuard)
 		suiClient, err = sui.NewClient(cfg.SUI)
 		if err != nil {
 			log.Fatalf("failed to create sui client: %v", err)
 		}
 
-		// 4. Register peer on-chain (with relay info if applicable)
+		// Register peer on-chain
 		ctx := context.Background()
-		if err := suiClient.RegisterPeer(ctx, wgManager.PublicKey(), endpoints, cfg.Identity.Hostname); err != nil {
+		var wgPubKey []byte
+		if wgManager != nil {
+			wgPubKey = wgManager.PublicKey()
+		}
+		if err := suiClient.RegisterPeer(ctx, wgPubKey, endpoints, cfg.Identity.Hostname); err != nil {
 			log.Printf("[sui] peer registration failed: %v", err)
 		}
 
-		// 5. Query existing peers and sync WireGuard
-		peers, err := suiClient.QueryPeers(ctx)
-		if err != nil {
-			log.Printf("[sui] failed to query peers: %v", err)
-		} else if len(peers) > 0 {
-			if err := wgManager.SyncPeers(peers); err != nil {
-				log.Printf("[wg] failed to sync peers: %v", err)
+		// Query existing peers and sync WireGuard (only if WG is available)
+		if wgManager != nil {
+			peers, err := suiClient.QueryPeers(ctx)
+			if err != nil {
+				log.Printf("[sui] failed to query peers: %v", err)
+			} else if len(peers) > 0 {
+				if err := wgManager.SyncPeers(peers); err != nil {
+					log.Printf("[wg] failed to sync peers: %v", err)
+				}
 			}
 		}
 

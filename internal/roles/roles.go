@@ -61,7 +61,7 @@ func Resolve(cfg *config.Config) *ActiveRoles {
 
 	// NAT detection for auto roles (relay + stun server)
 	if cfg.STUN.Enabled {
-		natType, publicEndpoint := detectNAT(cfg.STUN.Servers)
+		natType, publicEndpoint := detectNAT(cfg.STUN.Servers, cfg.STUN.BindAddress)
 		roles.NATType = natType
 		roles.PublicEndpoint = publicEndpoint
 
@@ -103,13 +103,13 @@ func Resolve(cfg *config.Config) *ActiveRoles {
 // If both return the same mapped port as local, NAT type is "none" (public IP).
 // If mapped ports differ from local but match each other, "full-cone".
 // If mapped ports differ from each other, "symmetric".
-func detectNAT(servers []string) (NATType, string) {
+func detectNAT(servers []string, bindAddr string) (NATType, string) {
 	if len(servers) == 0 {
 		return NATUnknown, ""
 	}
 
 	// First probe: discover our public endpoint
-	endpoint1, err := stun.DiscoverEndpoint(servers)
+	endpoint1, err := stun.DiscoverEndpoint(servers, bindAddr)
 	if err != nil {
 		log.Printf("[roles] STUN probe 1 failed: %v", err)
 		return NATUnknown, ""
@@ -120,7 +120,7 @@ func detectNAT(servers []string) (NATType, string) {
 	for i, s := range servers {
 		reversed[len(servers)-1-i] = s
 	}
-	endpoint2, err := stun.DiscoverEndpoint(reversed)
+	endpoint2, err := stun.DiscoverEndpoint(reversed, bindAddr)
 	if err != nil {
 		// Single successful probe — assume non-symmetric
 		log.Printf("[roles] STUN probe 2 failed, assuming full-cone: %v", err)

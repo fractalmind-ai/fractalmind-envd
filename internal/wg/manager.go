@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -78,24 +77,6 @@ func (m *Manager) Setup() error {
 	}
 
 	log.Printf("[wg] interface %s configured (port %d)", m.cfg.InterfaceName, port)
-	return nil
-}
-
-// ensureInterface creates a kernel WireGuard interface if it does not exist.
-func ensureInterface(name string) error {
-	// Check if interface already exists
-	if out, err := exec.Command("ip", "link", "show", name).CombinedOutput(); err == nil {
-		_ = out
-		return nil
-	}
-
-	if out, err := exec.Command("ip", "link", "add", "dev", name, "type", "wireguard").CombinedOutput(); err != nil {
-		return fmt.Errorf("ip link add %s: %s (%w)", name, string(out), err)
-	}
-	if out, err := exec.Command("ip", "link", "set", name, "up").CombinedOutput(); err != nil {
-		return fmt.Errorf("ip link set %s up: %s (%w)", name, string(out), err)
-	}
-	log.Printf("[wg] created interface %s", name)
 	return nil
 }
 

@@ -16,9 +16,10 @@ import (
 //  3. Public STUN servers (Google/Cloudflare, from config)
 //
 // Returns the first successful endpoint discovery.
-func LayeredDiscover(orgServers, sharedServers, publicServers []string) (string, error) {
+// bindAddr is optional; if non-empty, STUN probes bind to this local address.
+func LayeredDiscover(orgServers, sharedServers, publicServers []string, bindAddr string) (string, error) {
 	if len(orgServers) > 0 {
-		endpoint, err := DiscoverEndpoint(orgServers)
+		endpoint, err := DiscoverEndpoint(orgServers, bindAddr)
 		if err == nil {
 			log.Printf("[stun] resolved via org STUN")
 			return endpoint, nil
@@ -27,7 +28,7 @@ func LayeredDiscover(orgServers, sharedServers, publicServers []string) (string,
 	}
 
 	if len(sharedServers) > 0 {
-		endpoint, err := DiscoverEndpoint(sharedServers)
+		endpoint, err := DiscoverEndpoint(sharedServers, bindAddr)
 		if err == nil {
 			log.Printf("[stun] resolved via shared STUN")
 			return endpoint, nil
@@ -35,15 +36,16 @@ func LayeredDiscover(orgServers, sharedServers, publicServers []string) (string,
 		log.Printf("[stun] shared STUN failed, trying public: %v", err)
 	}
 
-	return DiscoverEndpoint(publicServers)
+	return DiscoverEndpoint(publicServers, bindAddr)
 }
 
 // DiscoverEndpoint uses STUN to discover the public IP:port of this host.
 // Tries servers in order, returns the first successful result.
-func DiscoverEndpoint(servers []string) (string, error) {
+// bindAddr is optional; if non-empty, STUN probes bind to this local address.
+func DiscoverEndpoint(servers []string, bindAddr string) (string, error) {
 	for _, server := range servers {
 		addr := strings.TrimPrefix(server, "stun:")
-		endpoint, err := stunQuery(addr)
+		endpoint, err := stunQuery(addr, bindAddr)
 		if err != nil {
 			log.Printf("[stun] server %s failed: %v", addr, err)
 			continue
@@ -54,8 +56,20 @@ func DiscoverEndpoint(servers []string) (string, error) {
 	return "", fmt.Errorf("all STUN servers failed")
 }
 
-func stunQuery(server string) (string, error) {
-	conn, err := net.DialTimeout("udp", server, 5*time.Second)
+func stunQuery(server, bindAddr string) (string, error) {
+	var conn net.Conn
+	var err error
+
+	if bindAddr != "" {
+		// Bind to specific local address (avoids VPN tunnel routing issues)
+		dialer := net.Dialer{
+			Timeout:   5 * time.Second,
+			LocalAddr: &net.UDPAddr{IP: net.ParseIP(bindAddr)},
+		}
+		conn, err = dialer.Dial("udp", server)
+	} else {
+		conn, err = net.DialTimeout("udp", server, 5*time.Second)
+	}
 	if err != nil {
 		return "", fmt.Errorf("dial: %w", err)
 	}
