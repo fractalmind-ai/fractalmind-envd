@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -175,6 +176,8 @@ func main() {
 	// ======= v3: Start role-specific services =======
 	var relayServer *relay.Server
 	var stunOnlyServer *relay.StunOnlyServer
+	var wssHandler *relay.WSSHandler
+	var wssClient *relay.WSSClient
 
 	if activeRoles.Relay {
 		// Combined STUN + Relay on shared UDP port
@@ -188,6 +191,28 @@ func main() {
 		}
 		log.Printf("[relay] relay server enabled on :%d (region=%s, isp=%s)",
 			cfg.Relay.ListenPort, cfg.Relay.Region, cfg.Relay.ISP)
+
+		// Start WSS relay handler if tcp_fallback config is present
+		if cfg.Relay.TCPFallback && activeRoles.PublicEndpoint != "" {
+			publicIP := activeRoles.PublicEndpoint
+			// Extract IP from "ip:port"
+			for i := len(publicIP) - 1; i >= 0; i-- {
+				if publicIP[i] == ':' {
+					publicIP = publicIP[:i]
+					break
+				}
+			}
+			wssHandler = relay.NewWSSHandler(publicIP, cfg.Relay.WSSPortMin, cfg.Relay.WSSPortMax)
+			mux := http.NewServeMux()
+			mux.Handle("/wg-relay", wssHandler)
+			wssAddr := fmt.Sprintf(":%d", cfg.Relay.WSSListenPort)
+			go func() {
+				log.Printf("[wss-relay] WSS relay server listening on %s", wssAddr)
+				if err := http.ListenAndServe(wssAddr, mux); err != nil {
+					log.Printf("[wss-relay] server error: %v", err)
+				}
+			}()
+		}
 	} else if activeRoles.StunServer {
 		// STUN-only server (no relay capability)
 		stunOnlyServer = relay.NewStunOnlyServer(cfg.Relay.ListenPort)
@@ -200,6 +225,27 @@ func main() {
 	if activeRoles.Coordinator {
 		log.Printf("[coordinator] REST API enabled")
 		// REST API already exists in current codebase
+	}
+
+	// ======= WSS relay client (for UDP-restricted nodes) =======
+	if activeRoles.TCPFallbackActive && cfg.Relay.RelayURL != "" && suiClient != nil {
+		wssClient = relay.NewWSSClient(
+			cfg.Relay.RelayURL,
+			suiClient.Address(),
+			fmt.Sprintf("127.0.0.1:%d", cfg.WireGuard.ListenPort),
+		)
+		ctx := context.Background()
+		relayEndpoint, err := wssClient.Connect(ctx)
+		if err != nil {
+			log.Printf("[wss-client] failed to connect to relay: %v", err)
+			wssClient = nil
+		} else {
+			log.Printf("[wss-client] connected via WSS relay, endpoint: %s", relayEndpoint)
+			// Update SUI registration with the relay endpoint
+			if err := suiClient.UpdateEndpoints(ctx, []string{relayEndpoint}); err != nil {
+				log.Printf("[wss-client] failed to update SUI endpoint: %v", err)
+			}
+		}
 	}
 
 	// Handle commands from Gateway
@@ -305,6 +351,13 @@ func main() {
 
 		case sig := <-sigCh:
 			log.Printf("received signal %s, shutting down", sig)
+
+			// Graceful WSS relay shutdown
+			if wssClient != nil {
+				if err := wssClient.Close(); err != nil {
+					log.Printf("[wss-client] close failed: %v", err)
+				}
+			}
 
 			// Graceful relay/STUN shutdown
 			if relayServer != nil {

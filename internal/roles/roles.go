@@ -9,6 +9,8 @@ package roles
 
 import (
 	"log"
+	"net"
+	"time"
 
 	"github.com/fractalmind-ai/fractalmind-envd/internal/config"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/stun"
@@ -45,8 +47,9 @@ type ActiveRoles struct {
 	StunServer  bool
 	Sponsor     bool
 
-	NATType        NATType
-	PublicEndpoint string // Discovered public IP:port (empty if behind NAT)
+	NATType          NATType
+	PublicEndpoint   string // Discovered public IP:port (empty if behind NAT)
+	TCPFallbackActive bool  // True when UDP is completely blocked and WSS relay is needed
 }
 
 // Resolve determines which roles are active based on config and NAT detection.
@@ -93,6 +96,17 @@ func Resolve(cfg *config.Config) *ActiveRoles {
 		roles.Sponsor = false
 	}
 
+	// TCP fallback detection: when STUN fails AND tcp_fallback is configured
+	if roles.NATType == NATUnknown && cfg.Relay.TCPFallback && cfg.Relay.RelayURL != "" {
+		// STUN failed — probe UDP connectivity to confirm UDP is blocked
+		if !probeUDP(cfg.STUN.Servers) {
+			roles.TCPFallbackActive = true
+			log.Printf("[roles] UDP completely blocked — WSS relay fallback activated")
+		} else {
+			log.Printf("[roles] STUN failed but UDP reachable — skipping WSS fallback")
+		}
+	}
+
 	log.Printf("[roles] active: worker=true coordinator=%v relay=%v stun_server=%v sponsor=%v",
 		roles.Coordinator, roles.Relay, roles.StunServer, roles.Sponsor)
 
@@ -137,4 +151,31 @@ func detectNAT(servers []string, bindAddr string) (NATType, string) {
 
 	// Different mapped addresses → symmetric NAT
 	return NATSymmetric, endpoint1
+}
+
+// probeUDP sends a single UDP packet to known hosts to check if outbound UDP works.
+// Returns true if at least one UDP probe gets a response.
+func probeUDP(stunServers []string) bool {
+	for _, server := range stunServers {
+		// Strip "stun:" prefix if present
+		addr := server
+		if len(addr) > 5 && addr[:5] == "stun:" {
+			addr = addr[5:]
+		}
+
+		conn, err := net.DialTimeout("udp", addr, 3*time.Second)
+		if err != nil {
+			continue
+		}
+		conn.SetDeadline(time.Now().Add(3 * time.Second))
+		// Send a minimal STUN binding request (just needs any response)
+		conn.Write([]byte{0x00, 0x01, 0x00, 0x00}) // STUN method + length
+		buf := make([]byte, 64)
+		_, err = conn.Read(buf)
+		conn.Close()
+		if err == nil {
+			return true // Got a UDP response
+		}
+	}
+	return false
 }

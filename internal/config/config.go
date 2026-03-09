@@ -81,6 +81,13 @@ type RelayConfig struct {
 	BandwidthLimit string `yaml:"bandwidth_limit"`
 	Region         string `yaml:"region"`
 	ISP            string `yaml:"isp"`
+
+	// TCP fallback: WSS relay for UDP-restricted networks (Issue #8)
+	TCPFallback  bool   `yaml:"tcp_fallback"`     // Enable WSS fallback when UDP fails
+	RelayURL     string `yaml:"relay_url"`         // WSS relay endpoint (e.g., "wss://relay.example.com/wg-relay")
+	WSSListenPort int   `yaml:"wss_listen_port"`   // WSS server port for relay nodes (default: 443)
+	WSSPortMin   int    `yaml:"wss_port_min"`      // UDP port pool start for WSS clients (default: 51900)
+	WSSPortMax   int    `yaml:"wss_port_max"`      // UDP port pool end for WSS clients (default: 51999)
 }
 
 type WireGuardConfig struct {
@@ -150,6 +157,9 @@ func DefaultConfig() *Config {
 		Relay: RelayConfig{
 			ListenPort:     3478,
 			MaxConnections: 100,
+			WSSListenPort:  443,
+			WSSPortMin:     51900,
+			WSSPortMax:     51999,
 		},
 	}
 }
