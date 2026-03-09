@@ -178,7 +178,7 @@ jobs:
             package_id: '0xc3448b4cfbe7771a9d42b12d3231b4819dc68583e44f39f9f2613d085e90f8f1'
             protocol_package_id: '0x685d6fb6ed8b0e679bb467ea73111819ec6ff68b1466d24ca26b400095dcdf24'
             registry_id: '0xceaf0c2208cd561e01694e80ca7de37a0b0113856ddb45c032be02bbb1969bee'
-            org_id: '0x66f00e15b28696a3824eb23b3cb3f0070d5f0fd1050c7ae32e2e2bce2565f0cb'
+            org_id: '0x9f6e36a1e0fe240b429ac1278f8b76d2d3ef13efd0f8f4863f9cf33d967b157f'
 
           wireguard:
             enabled: true
