@@ -40,10 +40,11 @@ func newTestManager(t *testing.T, mock *mockWG) *Manager {
 			InterfaceName: "wg-test",
 			ListenPort:    51820,
 		},
-		wg:         mock,
-		privateKey: key,
-		publicKey:  key.PublicKey(),
-		peers:      make(map[string]wgtypes.Key),
+		wg:              mock,
+		privateKey:      key,
+		publicKey:       key.PublicKey(),
+		ensureInterface: func(string) error { return nil },
+		peers:           make(map[string]wgtypes.Key),
 	}
 }
 

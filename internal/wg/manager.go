@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -25,11 +26,12 @@ type WGConfigurator interface {
 
 // Manager manages the WireGuard interface and peer configuration.
 type Manager struct {
-	mu         sync.Mutex
-	cfg        config.WireGuardConfig
-	wg         WGConfigurator
-	privateKey wgtypes.Key
-	publicKey  wgtypes.Key
+	mu              sync.Mutex
+	cfg             config.WireGuardConfig
+	wg              WGConfigurator
+	privateKey      wgtypes.Key
+	publicKey       wgtypes.Key
+	ensureInterface func(name string) error
 	// suiAddr → wg public key mapping for tracked peers
 	peers map[string]wgtypes.Key
 }
@@ -45,11 +47,12 @@ func NewManager(cfg config.WireGuardConfig, wg WGConfigurator) (*Manager, error)
 	log.Printf("[wg] public key: %s", pubKey.String())
 
 	return &Manager{
-		cfg:        cfg,
-		wg:         wg,
-		privateKey: key,
-		publicKey:  pubKey,
-		peers:      make(map[string]wgtypes.Key),
+		cfg:             cfg,
+		wg:              wg,
+		privateKey:      key,
+		publicKey:       pubKey,
+		ensureInterface: ensureInterface,
+		peers:           make(map[string]wgtypes.Key),
 	}, nil
 }
 
@@ -59,8 +62,12 @@ func (m *Manager) PublicKey() []byte {
 	return key[:]
 }
 
-// Setup configures the WireGuard interface with the private key and listen port.
+// Setup creates the WireGuard interface (if absent) and configures it.
 func (m *Manager) Setup() error {
+	if err := m.ensureInterface(m.cfg.InterfaceName); err != nil {
+		return fmt.Errorf("ensure interface: %w", err)
+	}
+
 	port := m.cfg.ListenPort
 	err := m.wg.ConfigureDevice(m.cfg.InterfaceName, wgtypes.Config{
 		PrivateKey: &m.privateKey,
@@ -71,6 +78,24 @@ func (m *Manager) Setup() error {
 	}
 
 	log.Printf("[wg] interface %s configured (port %d)", m.cfg.InterfaceName, port)
+	return nil
+}
+
+// ensureInterface creates a kernel WireGuard interface if it does not exist.
+func ensureInterface(name string) error {
+	// Check if interface already exists
+	if out, err := exec.Command("ip", "link", "show", name).CombinedOutput(); err == nil {
+		_ = out
+		return nil
+	}
+
+	if out, err := exec.Command("ip", "link", "add", "dev", name, "type", "wireguard").CombinedOutput(); err != nil {
+		return fmt.Errorf("ip link add %s: %s (%w)", name, string(out), err)
+	}
+	if out, err := exec.Command("ip", "link", "set", name, "up").CombinedOutput(); err != nil {
+		return fmt.Errorf("ip link set %s up: %s (%w)", name, string(out), err)
+	}
+	log.Printf("[wg] created interface %s", name)
 	return nil
 }
 
