@@ -388,3 +388,157 @@ func TestDirectVsSponsoredRouting(t *testing.T) {
 func hasPrefix(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
+
+func TestRegisterPeerPubKeyPrefix(t *testing.T) {
+	kp := testKeypair(t)
+	var capturedArgs []interface{}
+
+	mock := &mockRPC{
+		moveCallFn: func(_ context.Context, req models.MoveCallRequest) (models.TxnMetaData, error) {
+			capturedArgs = req.Arguments
+			return models.TxnMetaData{}, nil
+		},
+	}
+
+	client := newClientWithRPC(mock, kp, "0xpkg", "0xproto", "0xreg", "0xorg", "0xcert")
+
+	wgKey := make([]byte, 32)
+	wgKey[0] = 0xAB
+	err := client.RegisterPeer(context.Background(), wgKey, []string{"1.2.3.4:51820"}, "test-host")
+	if err != nil {
+		t.Fatalf("RegisterPeer: %v", err)
+	}
+
+	// Args: registryID, orgID, certID, pubKeyHex, endpoints, hostname
+	if len(capturedArgs) < 4 {
+		t.Fatalf("expected at least 4 args, got %d", len(capturedArgs))
+	}
+	pubKeyHex, ok := capturedArgs[3].(string)
+	if !ok {
+		t.Fatalf("arg[3] should be string, got %T", capturedArgs[3])
+	}
+	if !hasPrefix(pubKeyHex, "0x") {
+		t.Errorf("pubKeyHex should start with 0x, got %s", pubKeyHex)
+	}
+	// Verify the hex content after prefix
+	expectedHex := "0x" + hex.EncodeToString(wgKey)
+	if pubKeyHex != expectedHex {
+		t.Errorf("pubKeyHex = %s, want %s", pubKeyHex, expectedHex)
+	}
+}
+
+func TestEnsureAgentCertExisting(t *testing.T) {
+	kp := testKeypair(t)
+
+	mock := &mockRPC{
+		ownedObjectsFn: func(_ context.Context, req models.SuiXGetOwnedObjectsRequest) (models.PaginatedObjectsResponse, error) {
+			// Return an existing cert
+			return models.PaginatedObjectsResponse{
+				Data: []models.SuiObjectResponse{
+					{Data: &models.SuiObjectData{ObjectId: "0xexisting_cert_123"}},
+				},
+			}, nil
+		},
+	}
+
+	client := newClientWithRPC(mock, kp, "0xpkg", "0xproto", "0xreg", "0xorg", "")
+
+	certID, err := client.ensureAgentCert(context.Background())
+	if err != nil {
+		t.Fatalf("ensureAgentCert: %v", err)
+	}
+	if certID != "0xexisting_cert_123" {
+		t.Errorf("certID = %s, want 0xexisting_cert_123", certID)
+	}
+}
+
+func TestEnsureAgentCertAutoRegister(t *testing.T) {
+	kp := testKeypair(t)
+	callCount := 0
+	var registeredModule, registeredFunction string
+
+	mock := &mockRPC{
+		ownedObjectsFn: func(_ context.Context, req models.SuiXGetOwnedObjectsRequest) (models.PaginatedObjectsResponse, error) {
+			callCount++
+			if callCount == 1 {
+				// First call: no cert found
+				return models.PaginatedObjectsResponse{}, nil
+			}
+			// Second call: cert created after registration
+			return models.PaginatedObjectsResponse{
+				Data: []models.SuiObjectResponse{
+					{Data: &models.SuiObjectData{ObjectId: "0xnew_cert_456"}},
+				},
+			}, nil
+		},
+		moveCallFn: func(_ context.Context, req models.MoveCallRequest) (models.TxnMetaData, error) {
+			registeredModule = req.Module
+			registeredFunction = req.Function
+			return models.TxnMetaData{}, nil
+		},
+	}
+
+	client := newClientWithRPC(mock, kp, "0xpkg", "0xproto", "0xreg", "0xorg", "")
+
+	certID, err := client.ensureAgentCert(context.Background())
+	if err != nil {
+		t.Fatalf("ensureAgentCert: %v", err)
+	}
+	if certID != "0xnew_cert_456" {
+		t.Errorf("certID = %s, want 0xnew_cert_456", certID)
+	}
+	if registeredModule != "entry" || registeredFunction != "register_agent" {
+		t.Errorf("expected entry.register_agent, got %s.%s", registeredModule, registeredFunction)
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 getOwnedObjects calls, got %d", callCount)
+	}
+}
+
+func TestEnsureAgentCertNoProtocolPackage(t *testing.T) {
+	kp := testKeypair(t)
+	mock := &mockRPC{}
+
+	// No protocolPackageID configured
+	client := newClientWithRPC(mock, kp, "0xpkg", "", "0xreg", "0xorg", "")
+
+	_, err := client.ensureAgentCert(context.Background())
+	if err == nil {
+		t.Fatal("expected error when protocolPackageID is empty")
+	}
+	if !hasPrefix(err.Error(), "protocol_package_id not configured") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestPollNewEventsNilCursor(t *testing.T) {
+	kp := testKeypair(t)
+	var capturedCursors []interface{}
+
+	mock := &mockRPC{
+		queryEventsFn: func(_ context.Context, req models.SuiXQueryEventsRequest) (models.PaginatedEventsResponse, error) {
+			capturedCursors = append(capturedCursors, req.Cursor)
+			return models.PaginatedEventsResponse{}, nil
+		},
+	}
+
+	client := newClientWithRPC(mock, kp, "0xpkg", "0xproto", "0xreg", "0xorg", "0xcert")
+
+	// Initial poll with nil cursor
+	_, newCursor, err := client.PollNewEvents(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("PollNewEvents: %v", err)
+	}
+
+	// All 5 event type queries should have received nil cursor
+	for i, c := range capturedCursors {
+		if c != nil {
+			t.Errorf("query %d: cursor should be nil, got %v", i, c)
+		}
+	}
+
+	// newCursor should remain nil when no events
+	if newCursor != nil {
+		t.Errorf("newCursor should be nil when no events, got %v", newCursor)
+	}
+}
