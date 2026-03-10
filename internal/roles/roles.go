@@ -47,9 +47,9 @@ type ActiveRoles struct {
 	StunServer  bool
 	Sponsor     bool
 
-	NATType          NATType
-	PublicEndpoint   string // Discovered public IP:port (empty if behind NAT)
-	TCPFallbackActive bool  // True when UDP is completely blocked and WSS relay is needed
+	NATType           NATType
+	PublicEndpoint    string // Discovered public IP:port (empty if behind NAT)
+	TCPFallbackActive bool   // True when UDP is completely blocked and WSS relay is needed
 }
 
 // Resolve determines which roles are active based on config and NAT detection.
@@ -97,7 +97,8 @@ func Resolve(cfg *config.Config) *ActiveRoles {
 	}
 
 	// TCP fallback detection: when STUN fails AND tcp_fallback is configured
-	if roles.NATType == NATUnknown && cfg.Relay.TCPFallback && cfg.Relay.RelayURL != "" {
+	// relay_url is no longer required — the node can auto-discover relays from SUI chain
+	if roles.NATType == NATUnknown && cfg.Relay.TCPFallback {
 		// STUN failed — probe UDP connectivity to confirm UDP is blocked
 		if !probeUDP(cfg.STUN.Servers) {
 			roles.TCPFallbackActive = true
