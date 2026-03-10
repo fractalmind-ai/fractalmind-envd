@@ -215,6 +215,19 @@ func main() {
 				}
 			}()
 		}
+
+		// Register as relay on SUI chain so clients can auto-discover this relay
+		if suiClient != nil {
+			wssPort := cfg.Relay.WSSListenPort
+			if cfg.Relay.WSSExternalPort > 0 {
+				wssPort = cfg.Relay.WSSExternalPort
+			}
+			relayAddr := fmt.Sprintf("%s:%d", relayIP, wssPort)
+			capacity := uint64(cfg.Relay.MaxConnections)
+			if err := suiClient.RegisterRelay(context.Background(), relayAddr, cfg.Relay.Region, cfg.Relay.ISP, capacity); err != nil {
+				log.Printf("[sui] relay registration failed: %v", err)
+			}
+		}
 	} else if activeRoles.StunServer {
 		// STUN-only server (no relay capability)
 		stunOnlyServer = relay.NewStunOnlyServer(cfg.Relay.ListenPort)

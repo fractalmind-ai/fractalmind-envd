@@ -83,13 +83,14 @@ type RelayConfig struct {
 	ISP            string `yaml:"isp"`
 
 	// TCP fallback: WSS relay for UDP-restricted networks (Issue #8)
-	TCPFallback  bool   `yaml:"tcp_fallback"`     // Enable WSS fallback when UDP fails
-	RelayURL     string `yaml:"relay_url"`         // WSS relay endpoint (e.g., "wss://relay.example.com/wg-relay")
-	WSSListenPort int   `yaml:"wss_listen_port"`   // WSS server port for relay nodes (default: 443)
-	WSSCertFile  string `yaml:"wss_cert_file"`     // TLS certificate file (if empty, plain HTTP — requires reverse proxy for TLS)
-	WSSKeyFile   string `yaml:"wss_key_file"`      // TLS private key file
-	WSSPortMin   int    `yaml:"wss_port_min"`      // UDP port pool start for WSS clients (default: 51900)
-	WSSPortMax   int    `yaml:"wss_port_max"`      // UDP port pool end for WSS clients (default: 51999)
+	TCPFallback     bool   `yaml:"tcp_fallback"`      // Enable WSS fallback when UDP fails
+	RelayURL        string `yaml:"relay_url"`         // WSS relay endpoint (e.g., "wss://relay.example.com/wg-relay")
+	WSSListenPort   int    `yaml:"wss_listen_port"`   // WSS server port for relay nodes (default: 443)
+	WSSExternalPort int    `yaml:"wss_external_port"` // External WSS port for relay_addr (e.g., 443 when iptables redirects 443→8443)
+	WSSCertFile     string `yaml:"wss_cert_file"`     // TLS certificate file (if empty, plain HTTP — requires reverse proxy for TLS)
+	WSSKeyFile      string `yaml:"wss_key_file"`      // TLS private key file
+	WSSPortMin      int    `yaml:"wss_port_min"`      // UDP port pool start for WSS clients (default: 51900)
+	WSSPortMax      int    `yaml:"wss_port_max"`      // UDP port pool end for WSS clients (default: 51999)
 }
 
 type WireGuardConfig struct {
