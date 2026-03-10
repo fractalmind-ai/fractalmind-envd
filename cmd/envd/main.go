@@ -27,6 +27,9 @@ import (
 var (
 	version   = "dev"
 	startedAt = time.Now()
+
+	// relayPeers tracks SUI address → relay peer ID for WSS fallback cleanup.
+	relayPeers = make(map[string]uint16)
 )
 
 func main() {
@@ -525,23 +528,57 @@ func syncPeers(wgManager *wg.Manager, wssClient *relay.WSSClient, peers []sui.Pe
 		return
 	}
 
-	// WSS fallback mode: route each peer through the relay
+	// WSS fallback mode: reconcile relay routes
 	ctx := context.Background()
+
+	// Build desired set from incoming peers
+	desired := make(map[string]struct{})
+	for _, p := range peers {
+		if len(p.Endpoints) > 0 && p.Status == sui.PeerStatusOnline {
+			desired[p.Address] = struct{}{}
+		}
+	}
+
+	// Remove relay routes for peers no longer in the desired set
+	for addr, peerID := range relayPeers {
+		if _, ok := desired[addr]; !ok {
+			if err := wssClient.RemovePeer(ctx, peerID); err != nil {
+				log.Printf("[wss-client] failed to remove stale peer %s: %v", truncAddr(addr), err)
+			} else {
+				log.Printf("[wss-client] removed stale relay route for %s", truncAddr(addr))
+			}
+			delete(relayPeers, addr)
+		}
+	}
+
+	// Add relay routes for new peers, skip already-routed ones
 	for i, p := range peers {
-		if len(p.Endpoints) == 0 {
+		if len(p.Endpoints) == 0 || p.Status != sui.PeerStatusOnline {
 			continue
 		}
-		localAddr, _, err := wssClient.AddPeer(ctx, p.Endpoints[0])
+		if _, routed := relayPeers[p.Address]; routed {
+			continue // already has an active relay route
+		}
+		localAddr, peerID, err := wssClient.AddPeer(ctx, p.Endpoints[0])
 		if err != nil {
-			log.Printf("[wss-client] failed to add peer %s via relay: %v", p.Address[:10], err)
+			log.Printf("[wss-client] failed to add peer %s via relay: %v", truncAddr(p.Address), err)
 			continue
 		}
+		relayPeers[p.Address] = peerID
 		// Rewrite endpoint to the local proxy address
 		peers[i].Endpoints = []string{localAddr}
-		log.Printf("[wss-client] peer %s routed via local proxy %s", p.Address[:10], localAddr)
+		log.Printf("[wss-client] peer %s routed via local proxy %s", truncAddr(p.Address), localAddr)
 	}
 
 	if err := wgManager.SyncPeers(peers); err != nil {
 		log.Printf("[wg] failed to sync peers: %v", err)
 	}
+}
+
+// truncAddr safely truncates an address for logging.
+func truncAddr(s string) string {
+	if len(s) > 16 {
+		return s[:16]
+	}
+	return s
 }
