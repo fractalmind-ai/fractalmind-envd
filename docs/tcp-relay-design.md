@@ -149,9 +149,10 @@ relay:
 ## Security
 
 Defense-in-depth:
-1. **WSS/TLS** encrypts the WebSocket transport
+1. **WSS/TLS** encrypts the WebSocket transport. TLS can be configured directly (`wss_cert_file`/`wss_key_file`) or terminated at a reverse proxy (nginx, Caddy, cloud LB). If neither is configured, the server starts as plain HTTP with a warning.
 2. **WireGuard** encrypts inner packets (relay sees opaque ciphertext)
-3. **SUI identity** prevents relay impersonation (optional: SUI-signed auth token in WSS handshake)
+3. **SUI identity** — clients authenticate via Ed25519 challenge-response: relay sends a random nonce, client signs with their SUI keypair, relay verifies signature and derives SUI address from the public key to confirm ownership.
+4. **Target validation** — `add_peer` rejects loopback/unspecified addresses to prevent relay abuse.
 
 The relay only sees encrypted WireGuard packets inside an encrypted WSS tunnel.
 

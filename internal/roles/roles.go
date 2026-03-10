@@ -113,6 +113,9 @@ func Resolve(cfg *config.Config) *ActiveRoles {
 	return roles
 }
 
+// discoverEndpointFunc wraps stun.DiscoverEndpoint for testability.
+var discoverEndpointFunc = stun.DiscoverEndpoint
+
 // detectNAT probes STUN servers from two different source ports.
 // If both return the same mapped port as local, NAT type is "none" (public IP).
 // If mapped ports differ from local but match each other, "full-cone".
@@ -123,7 +126,7 @@ func detectNAT(servers []string, bindAddr string) (NATType, string) {
 	}
 
 	// First probe: discover our public endpoint
-	endpoint1, err := stun.DiscoverEndpoint(servers, bindAddr)
+	endpoint1, err := discoverEndpointFunc(servers, bindAddr)
 	if err != nil {
 		log.Printf("[roles] STUN probe 1 failed: %v", err)
 		return NATUnknown, ""
@@ -134,7 +137,7 @@ func detectNAT(servers []string, bindAddr string) (NATType, string) {
 	for i, s := range servers {
 		reversed[len(servers)-1-i] = s
 	}
-	endpoint2, err := stun.DiscoverEndpoint(reversed, bindAddr)
+	endpoint2, err := discoverEndpointFunc(reversed, bindAddr)
 	if err != nil {
 		// Single successful probe — assume non-symmetric
 		log.Printf("[roles] STUN probe 2 failed, assuming full-cone: %v", err)

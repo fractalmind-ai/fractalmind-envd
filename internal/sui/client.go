@@ -75,6 +75,11 @@ func (c *Client) Address() string {
 	return c.keypair.Address()
 }
 
+// Keypair returns the Ed25519 keypair for signing operations (e.g. WSS auth).
+func (c *Client) Keypair() *Keypair {
+	return c.keypair
+}
+
 // SetSponsor attaches a sponsor provider for gas sponsorship.
 func (c *Client) SetSponsor(sp SponsorProvider) {
 	c.sponsor = sp

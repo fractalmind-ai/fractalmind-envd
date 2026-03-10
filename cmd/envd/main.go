@@ -153,17 +153,8 @@ func main() {
 			log.Printf("[sui] peer registration failed: %v", err)
 		}
 
-		// Query existing peers and sync WireGuard (only if WG is available)
-		if wgManager != nil {
-			peers, err := suiClient.QueryPeers(ctx)
-			if err != nil {
-				log.Printf("[sui] failed to query peers: %v", err)
-			} else if len(peers) > 0 {
-				if err := wgManager.SyncPeers(peers); err != nil {
-					log.Printf("[wg] failed to sync peers: %v", err)
-				}
-			}
-		}
+		// NOTE: Initial peer sync is deferred until after WSS client setup,
+		// so peers can be routed through the WSS relay when fallback is active.
 
 		// Start SUI event poll ticker
 		pollInterval, _ := time.ParseDuration(cfg.SUI.PollInterval)
@@ -207,9 +198,17 @@ func main() {
 			mux.Handle("/wg-relay", wssHandler)
 			wssAddr := fmt.Sprintf(":%d", cfg.Relay.WSSListenPort)
 			go func() {
-				log.Printf("[wss-relay] WSS relay server listening on %s", wssAddr)
-				if err := http.ListenAndServe(wssAddr, mux); err != nil {
-					log.Printf("[wss-relay] server error: %v", err)
+				if cfg.Relay.WSSCertFile != "" && cfg.Relay.WSSKeyFile != "" {
+					log.Printf("[wss-relay] WSS relay server listening on %s (TLS)", wssAddr)
+					if err := http.ListenAndServeTLS(wssAddr, cfg.Relay.WSSCertFile, cfg.Relay.WSSKeyFile, mux); err != nil {
+						log.Printf("[wss-relay] server error: %v", err)
+					}
+				} else {
+					log.Printf("[wss-relay] WARNING: starting without TLS — use wss_cert_file/wss_key_file or terminate TLS at reverse proxy")
+					log.Printf("[wss-relay] WSS relay server listening on %s (plain HTTP)", wssAddr)
+					if err := http.ListenAndServe(wssAddr, mux); err != nil {
+						log.Printf("[wss-relay] server error: %v", err)
+					}
 				}
 			}()
 		}
@@ -232,6 +231,7 @@ func main() {
 		wssClient = relay.NewWSSClient(
 			cfg.Relay.RelayURL,
 			suiClient.Address(),
+			suiClient.Keypair(),
 			fmt.Sprintf("127.0.0.1:%d", cfg.WireGuard.ListenPort),
 		)
 		ctx := context.Background()
@@ -245,6 +245,17 @@ func main() {
 			if err := suiClient.UpdateEndpoints(ctx, []string{relayEndpoint}); err != nil {
 				log.Printf("[wss-client] failed to update SUI endpoint: %v", err)
 			}
+		}
+	}
+
+	// ======= Initial peer sync (after WSS client setup) =======
+	if suiClient != nil && wgManager != nil {
+		ctx := context.Background()
+		peers, err := suiClient.QueryPeers(ctx)
+		if err != nil {
+			log.Printf("[sui] failed to query peers: %v", err)
+		} else if len(peers) > 0 {
+			syncPeers(wgManager, wssClient, peers)
 		}
 	}
 
@@ -342,9 +353,7 @@ func main() {
 					eventCursor = newCursor
 					if len(newPeers) > 0 {
 						log.Printf("[sui] %d peer updates from poll", len(newPeers))
-						if err := wgManager.SyncPeers(newPeers); err != nil {
-							log.Printf("[wg] failed to sync peers: %v", err)
-						}
+						syncPeers(wgManager, wssClient, newPeers)
 					}
 				}
 			}
@@ -501,4 +510,38 @@ func handleCommand(cmd ws.CommandPayload, scanner *agent.Scanner, cfg *config.Co
 
 	log.Printf("[cmd] %s result: success=%v", cmd.Command, result["success"])
 	return result
+}
+
+// syncPeers syncs WireGuard peers, routing through WSS relay when active.
+// When wssClient is nil, peers are synced directly via WireGuard.
+// When wssClient is active (TCP fallback), each peer gets a local UDP proxy
+// and its WG endpoint is rewritten to the local proxy address.
+func syncPeers(wgManager *wg.Manager, wssClient *relay.WSSClient, peers []sui.PeerInfo) {
+	if wssClient == nil {
+		// Direct mode: WireGuard peers use their SUI-registered endpoints
+		if err := wgManager.SyncPeers(peers); err != nil {
+			log.Printf("[wg] failed to sync peers: %v", err)
+		}
+		return
+	}
+
+	// WSS fallback mode: route each peer through the relay
+	ctx := context.Background()
+	for i, p := range peers {
+		if len(p.Endpoints) == 0 {
+			continue
+		}
+		localAddr, _, err := wssClient.AddPeer(ctx, p.Endpoints[0])
+		if err != nil {
+			log.Printf("[wss-client] failed to add peer %s via relay: %v", p.Address[:10], err)
+			continue
+		}
+		// Rewrite endpoint to the local proxy address
+		peers[i].Endpoints = []string{localAddr}
+		log.Printf("[wss-client] peer %s routed via local proxy %s", p.Address[:10], localAddr)
+	}
+
+	if err := wgManager.SyncPeers(peers); err != nil {
+		log.Printf("[wg] failed to sync peers: %v", err)
+	}
 }

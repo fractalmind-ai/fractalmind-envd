@@ -2,6 +2,9 @@ package relay
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -10,8 +13,76 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/blake2b"
 	"nhooyr.io/websocket"
 )
+
+// testSigner implements Signer for tests using a generated Ed25519 keypair.
+type testSigner struct {
+	priv ed25519.PrivateKey
+	pub  ed25519.PublicKey
+}
+
+func newTestSigner(t *testing.T) *testSigner {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	return &testSigner{priv: priv, pub: pub}
+}
+
+func (s *testSigner) Sign(data []byte) []byte {
+	return ed25519.Sign(s.priv, data)
+}
+
+func (s *testSigner) PublicKeyBytes() []byte {
+	return []byte(s.pub)
+}
+
+// suiAddress derives the SUI address from the test signer's public key.
+func (s *testSigner) suiAddress() string {
+	payload := make([]byte, 1+len(s.pub))
+	payload[0] = 0x00
+	copy(payload[1:], s.pub)
+	hash := blake2b.Sum256(payload)
+	return "0x" + hex.EncodeToString(hash[:])
+}
+
+// doAuth performs the challenge-response auth handshake on a raw WebSocket connection.
+func doAuth(t *testing.T, ctx context.Context, conn *websocket.Conn, signer *testSigner) {
+	t.Helper()
+
+	// Read challenge
+	typ, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read challenge: %v", err)
+	}
+	if typ != websocket.MessageText {
+		t.Fatalf("expected text, got %v", typ)
+	}
+	var challenge ControlMsg
+	if err := json.Unmarshal(data, &challenge); err != nil {
+		t.Fatalf("unmarshal challenge: %v", err)
+	}
+	if challenge.Type != MsgTypeChallenge {
+		t.Fatalf("expected challenge, got %q", challenge.Type)
+	}
+
+	// Sign and respond
+	nonceBytes, _ := hex.DecodeString(challenge.Nonce)
+	sig := signer.Sign(nonceBytes)
+	authMsg := ControlMsg{
+		Type:       MsgTypeAuth,
+		SUiAddress: signer.suiAddress(),
+		PublicKey:  hex.EncodeToString(signer.PublicKeyBytes()),
+		Signature:  hex.EncodeToString(sig),
+	}
+	authData, _ := json.Marshal(authMsg)
+	if err := conn.Write(ctx, websocket.MessageText, authData); err != nil {
+		t.Fatalf("write auth: %v", err)
+	}
+}
 
 func TestWSSHandler_NewAndClose(t *testing.T) {
 	h := NewWSSHandler("1.2.3.4", 51900, 51910)
@@ -28,19 +99,13 @@ func TestWSSHandler_NewAndClose(t *testing.T) {
 }
 
 func TestWSSHandler_AuthFlow(t *testing.T) {
-	// Use port 0 to get OS-assigned ephemeral ports
-	h := NewWSSHandler("127.0.0.1", 0, 0)
-
-	// Override port range to use ephemeral ports that are actually free
 	freePort := findFreePort(t)
-	h.portMin = freePort
-	h.portMax = freePort
+	h := NewWSSHandler("127.0.0.1", freePort, freePort)
 
 	server := httptest.NewServer(h)
 	defer server.Close()
 	defer h.Close()
 
-	// Connect via WebSocket
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/wg-relay"
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -51,12 +116,8 @@ func TestWSSHandler_AuthFlow(t *testing.T) {
 	}
 	defer conn.CloseNow()
 
-	// Send auth
-	authMsg := ControlMsg{Type: MsgTypeAuth, SUiAddress: "0x1234567890abcdef1234567890abcdef12345678"}
-	data, _ := json.Marshal(authMsg)
-	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
-		t.Fatalf("write auth: %v", err)
-	}
+	signer := newTestSigner(t)
+	doAuth(t, ctx, conn, signer)
 
 	// Read allocated response
 	typ, respData, err := conn.Read(ctx)
@@ -80,11 +141,9 @@ func TestWSSHandler_AuthFlow(t *testing.T) {
 	t.Logf("allocated endpoint: %s", resp.Endpoint)
 }
 
-func TestWSSHandler_AuthRequired(t *testing.T) {
-	h := NewWSSHandler("127.0.0.1", 0, 0)
+func TestWSSHandler_AuthRequired_EmptyFields(t *testing.T) {
 	freePort := findFreePort(t)
-	h.portMin = freePort
-	h.portMax = freePort
+	h := NewWSSHandler("127.0.0.1", freePort, freePort)
 
 	server := httptest.NewServer(h)
 	defer server.Close()
@@ -100,36 +159,43 @@ func TestWSSHandler_AuthRequired(t *testing.T) {
 	}
 	defer conn.CloseNow()
 
-	// Send invalid auth (missing SUI address)
-	badAuth := ControlMsg{Type: MsgTypeAuth}
-	data, _ := json.Marshal(badAuth)
-	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	// Should get error response then close
-	typ, respData, err := conn.Read(ctx)
+	// Read challenge
+	typ, data, err := conn.Read(ctx)
 	if err != nil {
-		t.Fatalf("read: %v", err)
+		t.Fatalf("read challenge: %v", err)
 	}
 	if typ != websocket.MessageText {
 		t.Fatalf("expected text, got %v", typ)
 	}
+	var challenge ControlMsg
+	json.Unmarshal(data, &challenge)
+	if challenge.Type != MsgTypeChallenge {
+		t.Fatalf("expected challenge, got %q", challenge.Type)
+	}
+
+	// Send auth with missing fields
+	badAuth := ControlMsg{Type: MsgTypeAuth}
+	authData, _ := json.Marshal(badAuth)
+	if err := conn.Write(ctx, websocket.MessageText, authData); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Should get error response
+	_, respData, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
 
 	var resp ControlMsg
-	if err := json.Unmarshal(respData, &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	json.Unmarshal(respData, &resp)
 	if resp.Type != MsgTypeError {
 		t.Errorf("expected error, got %q", resp.Type)
 	}
 }
 
-func TestWSSHandler_PingPong(t *testing.T) {
-	h := NewWSSHandler("127.0.0.1", 0, 0)
+func TestWSSHandler_AuthRequired_BadSignature(t *testing.T) {
 	freePort := findFreePort(t)
-	h.portMin = freePort
-	h.portMax = freePort
+	h := NewWSSHandler("127.0.0.1", freePort, freePort)
 
 	server := httptest.NewServer(h)
 	defer server.Close()
@@ -145,17 +211,109 @@ func TestWSSHandler_PingPong(t *testing.T) {
 	}
 	defer conn.CloseNow()
 
-	// Auth first
-	authMsg := ControlMsg{Type: MsgTypeAuth, SUiAddress: "0xabcdef1234567890abcdef1234567890abcdef12"}
-	data, _ := json.Marshal(authMsg)
-	conn.Write(ctx, websocket.MessageText, data)
+	// Read challenge
+	_, data, _ := conn.Read(ctx)
+	var challenge ControlMsg
+	json.Unmarshal(data, &challenge)
+
+	signer := newTestSigner(t)
+
+	// Send auth with bad signature (sign wrong data)
+	badSig := signer.Sign([]byte("wrong data"))
+	authMsg := ControlMsg{
+		Type:       MsgTypeAuth,
+		SUiAddress: signer.suiAddress(),
+		PublicKey:  hex.EncodeToString(signer.PublicKeyBytes()),
+		Signature:  hex.EncodeToString(badSig),
+	}
+	authData, _ := json.Marshal(authMsg)
+	conn.Write(ctx, websocket.MessageText, authData)
+
+	// Should get error
+	_, respData, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var resp ControlMsg
+	json.Unmarshal(respData, &resp)
+	if resp.Type != MsgTypeError {
+		t.Errorf("expected error for bad signature, got %q", resp.Type)
+	}
+}
+
+func TestWSSHandler_AuthRequired_AddressMismatch(t *testing.T) {
+	freePort := findFreePort(t)
+	h := NewWSSHandler("127.0.0.1", freePort, freePort)
+
+	server := httptest.NewServer(h)
+	defer server.Close()
+	defer h.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial() error: %v", err)
+	}
+	defer conn.CloseNow()
+
+	// Read challenge
+	_, data, _ := conn.Read(ctx)
+	var challenge ControlMsg
+	json.Unmarshal(data, &challenge)
+	nonceBytes, _ := hex.DecodeString(challenge.Nonce)
+
+	signer := newTestSigner(t)
+
+	// Send auth with correct signature but wrong SUI address
+	sig := signer.Sign(nonceBytes)
+	authMsg := ControlMsg{
+		Type:       MsgTypeAuth,
+		SUiAddress: "0x0000000000000000000000000000000000000000000000000000000000000000", // wrong
+		PublicKey:  hex.EncodeToString(signer.PublicKeyBytes()),
+		Signature:  hex.EncodeToString(sig),
+	}
+	authData, _ := json.Marshal(authMsg)
+	conn.Write(ctx, websocket.MessageText, authData)
+
+	// Should get error
+	_, respData, _ := conn.Read(ctx)
+	var resp ControlMsg
+	json.Unmarshal(respData, &resp)
+	if resp.Type != MsgTypeError {
+		t.Errorf("expected error for address mismatch, got %q", resp.Type)
+	}
+}
+
+func TestWSSHandler_PingPong(t *testing.T) {
+	freePort := findFreePort(t)
+	h := NewWSSHandler("127.0.0.1", freePort, freePort)
+
+	server := httptest.NewServer(h)
+	defer server.Close()
+	defer h.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial() error: %v", err)
+	}
+	defer conn.CloseNow()
+
+	signer := newTestSigner(t)
+	doAuth(t, ctx, conn, signer)
 
 	// Read allocated
 	conn.Read(ctx)
 
 	// Send ping
 	pingMsg := ControlMsg{Type: MsgTypePing}
-	data, _ = json.Marshal(pingMsg)
+	data, _ := json.Marshal(pingMsg)
 	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
 		t.Fatalf("write ping: %v", err)
 	}
@@ -177,7 +335,6 @@ func TestWSSHandler_PingPong(t *testing.T) {
 }
 
 func TestWSSHandler_PortExhaustion(t *testing.T) {
-	// Only one port available
 	freePort := findFreePort(t)
 	h := NewWSSHandler("127.0.0.1", freePort, freePort)
 
@@ -190,20 +347,16 @@ func TestWSSHandler_PortExhaustion(t *testing.T) {
 	defer cancel()
 
 	// First client should succeed
+	signer1 := newTestSigner(t)
 	conn1, _, err := websocket.Dial(ctx, wsURL, nil)
 	if err != nil {
 		t.Fatalf("Dial() error: %v", err)
 	}
 	defer conn1.CloseNow()
 
-	authMsg := ControlMsg{Type: MsgTypeAuth, SUiAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-	data, _ := json.Marshal(authMsg)
-	conn1.Write(ctx, websocket.MessageText, data)
+	doAuth(t, ctx, conn1, signer1)
 
-	typ, respData, _ := conn1.Read(ctx)
-	if typ != websocket.MessageText {
-		t.Fatalf("expected text, got %v", typ)
-	}
+	_, respData, _ := conn1.Read(ctx)
 	var resp1 ControlMsg
 	json.Unmarshal(respData, &resp1)
 	if resp1.Type != MsgTypeAllocated {
@@ -211,15 +364,14 @@ func TestWSSHandler_PortExhaustion(t *testing.T) {
 	}
 
 	// Second client should fail (no ports left)
+	signer2 := newTestSigner(t)
 	conn2, _, err := websocket.Dial(ctx, wsURL, nil)
 	if err != nil {
 		t.Fatalf("Dial() error: %v", err)
 	}
 	defer conn2.CloseNow()
 
-	authMsg2 := ControlMsg{Type: MsgTypeAuth, SUiAddress: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
-	data2, _ := json.Marshal(authMsg2)
-	conn2.Write(ctx, websocket.MessageText, data2)
+	doAuth(t, ctx, conn2, signer2)
 
 	_, respData2, err := conn2.Read(ctx)
 	if err != nil {
@@ -233,11 +385,12 @@ func TestWSSHandler_PortExhaustion(t *testing.T) {
 }
 
 func TestWSSClient_NewAndClose(t *testing.T) {
-	c := NewWSSClient("wss://example.com/wg-relay", "0xabc123", "127.0.0.1:51820")
+	signer := newTestSigner(t)
+	c := NewWSSClient("wss://example.com/wg-relay", signer.suiAddress(), signer, "127.0.0.1:51820")
 	if c.relayURL != "wss://example.com/wg-relay" {
 		t.Errorf("relayURL = %q", c.relayURL)
 	}
-	if c.suiAddress != "0xabc123" {
+	if c.suiAddress != signer.suiAddress() {
 		t.Errorf("suiAddress = %q", c.suiAddress)
 	}
 	// Close without connect should be safe
@@ -251,7 +404,6 @@ func TestWSSClient_NewAndClose(t *testing.T) {
 }
 
 func TestWSSClientServer_EndToEnd(t *testing.T) {
-	// Start WSS relay handler
 	freePort := findFreePort(t)
 	h := NewWSSHandler("127.0.0.1", freePort, freePort)
 
@@ -261,8 +413,8 @@ func TestWSSClientServer_EndToEnd(t *testing.T) {
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
-	// Start WSS client
-	client := NewWSSClient(wsURL, "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "127.0.0.1:51820")
+	signer := newTestSigner(t)
+	client := NewWSSClient(wsURL, signer.suiAddress(), signer, "127.0.0.1:51820")
 	defer client.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -278,7 +430,6 @@ func TestWSSClientServer_EndToEnd(t *testing.T) {
 	}
 	t.Logf("relay endpoint: %s", endpoint)
 
-	// Verify RelayEndpoint returns the same
 	if got := client.RelayEndpoint(); got != endpoint {
 		t.Errorf("RelayEndpoint() = %q, want %q", got, endpoint)
 	}
@@ -293,7 +444,8 @@ func TestWSSClientServer_AddRemovePeer(t *testing.T) {
 	defer h.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	client := NewWSSClient(wsURL, "0x1111111111111111111111111111111111111111", "127.0.0.1:51820")
+	signer := newTestSigner(t)
+	client := NewWSSClient(wsURL, signer.suiAddress(), signer, "127.0.0.1:51820")
 	defer client.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -303,7 +455,7 @@ func TestWSSClientServer_AddRemovePeer(t *testing.T) {
 		t.Fatalf("Connect() error: %v", err)
 	}
 
-	// Add a peer
+	// Add a peer (use a non-loopback address)
 	localAddr, peerID, err := client.AddPeer(ctx, "10.0.0.1:51820")
 	if err != nil {
 		t.Fatalf("AddPeer() error: %v", err)
@@ -327,8 +479,6 @@ func TestWSSClientServer_AddRemovePeer(t *testing.T) {
 	}
 }
 
-// TestWSSHandler_Reconnect verifies that a client can reconnect
-// and get the same SUI address re-allocated.
 func TestWSSHandler_Reconnect(t *testing.T) {
 	freePort := findFreePort(t)
 	h := NewWSSHandler("127.0.0.1", freePort, freePort)
@@ -340,10 +490,10 @@ func TestWSSHandler_Reconnect(t *testing.T) {
 	defer h.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/wg-relay"
-	suiAddr := "0x2222222222222222222222222222222222222222"
+	signer := newTestSigner(t)
 
 	// First connection
-	client1 := NewWSSClient(wsURL, suiAddr, "127.0.0.1:51820")
+	client1 := NewWSSClient(wsURL, signer.suiAddress(), signer, "127.0.0.1:51820")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	ep1, err := client1.Connect(ctx)
 	cancel()
@@ -352,12 +502,11 @@ func TestWSSHandler_Reconnect(t *testing.T) {
 	}
 	t.Logf("first endpoint: %s", ep1)
 
-	// Close first client
 	client1.Close()
-	time.Sleep(100 * time.Millisecond) // let server process disconnect
+	time.Sleep(100 * time.Millisecond)
 
-	// Second connection with same SUI address
-	client2 := NewWSSClient(wsURL, suiAddr, "127.0.0.1:51820")
+	// Second connection with same signer
+	client2 := NewWSSClient(wsURL, signer.suiAddress(), signer, "127.0.0.1:51820")
 	defer client2.Close()
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
@@ -366,9 +515,166 @@ func TestWSSHandler_Reconnect(t *testing.T) {
 		t.Fatalf("second Connect() error: %v", err)
 	}
 	t.Logf("second endpoint: %s", ep2)
-	// Should get an endpoint (port may differ if reuse isn't instant)
 	if ep2 == "" {
 		t.Error("second endpoint should not be empty")
+	}
+}
+
+func TestWSSHandler_AddPeer_TargetValidation(t *testing.T) {
+	freePort := findFreePort(t)
+	h := NewWSSHandler("127.0.0.1", freePort, freePort)
+
+	server := httptest.NewServer(h)
+	defer server.Close()
+	defer h.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	signer := newTestSigner(t)
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial() error: %v", err)
+	}
+	defer conn.CloseNow()
+
+	doAuth(t, ctx, conn, signer)
+	// Read allocated
+	conn.Read(ctx)
+
+	// Try to add peer with loopback target — should be rejected
+	addMsg := ControlMsg{Type: MsgTypeAddPeer, PeerID: 1, Target: "127.0.0.1:51820"}
+	data, _ := json.Marshal(addMsg)
+	conn.Write(ctx, websocket.MessageText, data)
+
+	_, respData, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var resp ControlMsg
+	json.Unmarshal(respData, &resp)
+	if resp.Type != MsgTypeError {
+		t.Errorf("expected error for loopback target, got %q", resp.Type)
+	}
+
+	// Try to add peer with unspecified target
+	addMsg2 := ControlMsg{Type: MsgTypeAddPeer, PeerID: 2, Target: "0.0.0.0:51820"}
+	data2, _ := json.Marshal(addMsg2)
+	conn.Write(ctx, websocket.MessageText, data2)
+
+	_, respData2, _ := conn.Read(ctx)
+	var resp2 ControlMsg
+	json.Unmarshal(respData2, &resp2)
+	if resp2.Type != MsgTypeError {
+		t.Errorf("expected error for unspecified target, got %q", resp2.Type)
+	}
+}
+
+func TestValidateTarget(t *testing.T) {
+	tests := []struct {
+		target  string
+		wantErr bool
+	}{
+		{"10.0.0.1:51820", false},
+		{"192.168.1.1:51820", false},
+		{"8.8.8.8:443", false},
+		{"127.0.0.1:51820", true},  // loopback
+		{"0.0.0.0:51820", true},    // unspecified
+		{"not-ip:1234", true},      // invalid IP
+		{"badformat", true},        // no port
+	}
+
+	for _, tt := range tests {
+		err := validateTarget(tt.target)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("validateTarget(%q) error=%v, wantErr=%v", tt.target, err, tt.wantErr)
+		}
+	}
+}
+
+func TestVerifyAuth_Valid(t *testing.T) {
+	signer := newTestSigner(t)
+	nonce := make([]byte, 32)
+	rand.Read(nonce)
+
+	sig := signer.Sign(nonce)
+	msg := ControlMsg{
+		Type:       MsgTypeAuth,
+		SUiAddress: signer.suiAddress(),
+		PublicKey:  hex.EncodeToString(signer.PublicKeyBytes()),
+		Signature:  hex.EncodeToString(sig),
+	}
+
+	if err := verifyAuth(msg, nonce); err != nil {
+		t.Errorf("verifyAuth() should pass for valid auth: %v", err)
+	}
+}
+
+func TestVerifyAuth_InvalidSignature(t *testing.T) {
+	signer := newTestSigner(t)
+	nonce := make([]byte, 32)
+	rand.Read(nonce)
+
+	msg := ControlMsg{
+		Type:       MsgTypeAuth,
+		SUiAddress: signer.suiAddress(),
+		PublicKey:  hex.EncodeToString(signer.PublicKeyBytes()),
+		Signature:  hex.EncodeToString(make([]byte, 64)), // zero sig
+	}
+
+	if err := verifyAuth(msg, nonce); err == nil {
+		t.Error("verifyAuth() should fail for invalid signature")
+	}
+}
+
+func TestVerifyAuth_WrongAddress(t *testing.T) {
+	signer := newTestSigner(t)
+	nonce := make([]byte, 32)
+	rand.Read(nonce)
+
+	sig := signer.Sign(nonce)
+	msg := ControlMsg{
+		Type:       MsgTypeAuth,
+		SUiAddress: "0x0000000000000000000000000000000000000000000000000000000000000000",
+		PublicKey:  hex.EncodeToString(signer.PublicKeyBytes()),
+		Signature:  hex.EncodeToString(sig),
+	}
+
+	if err := verifyAuth(msg, nonce); err == nil {
+		t.Error("verifyAuth() should fail for wrong address")
+	}
+}
+
+func TestVerifyAuth_BadPublicKeyHex(t *testing.T) {
+	nonce := make([]byte, 32)
+	rand.Read(nonce)
+
+	msg := ControlMsg{
+		Type:       MsgTypeAuth,
+		SUiAddress: "0xabc",
+		PublicKey:  "not-valid-hex",
+		Signature:  "abcd",
+	}
+
+	if err := verifyAuth(msg, nonce); err == nil {
+		t.Error("verifyAuth() should fail for bad hex")
+	}
+}
+
+func TestVerifyAuth_BadPublicKeySize(t *testing.T) {
+	nonce := make([]byte, 32)
+	rand.Read(nonce)
+
+	msg := ControlMsg{
+		Type:       MsgTypeAuth,
+		SUiAddress: "0xabc",
+		PublicKey:  hex.EncodeToString([]byte("tooshort")),
+		Signature:  hex.EncodeToString(make([]byte, 64)),
+	}
+
+	if err := verifyAuth(msg, nonce); err == nil {
+		t.Error("verifyAuth() should fail for bad key size")
 	}
 }
 

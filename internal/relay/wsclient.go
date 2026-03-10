@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -18,6 +19,7 @@ type WSSClient struct {
 	mu            sync.Mutex
 	relayURL      string
 	suiAddress    string
+	signer        Signer
 	wgListenAddr  string // WireGuard's local UDP address (e.g., "127.0.0.1:51820")
 	conn          *websocket.Conn
 	relayEndpoint string              // Assigned public endpoint from relay
@@ -36,10 +38,12 @@ type proxyPeer struct {
 }
 
 // NewWSSClient creates a WSS relay client.
-func NewWSSClient(relayURL, suiAddress, wgListenAddr string) *WSSClient {
+// signer is used for challenge-response authentication (implements relay.Signer).
+func NewWSSClient(relayURL, suiAddress string, signer Signer, wgListenAddr string) *WSSClient {
 	return &WSSClient{
 		relayURL:     relayURL,
 		suiAddress:   suiAddress,
+		signer:       signer,
 		wgListenAddr: wgListenAddr,
 		peers:        make(map[uint16]*proxyPeer),
 		nextPeerID:   1,
@@ -62,8 +66,33 @@ func (c *WSSClient) Connect(ctx context.Context) (string, error) {
 	c.conn = conn
 	c.mu.Unlock()
 
-	// Authenticate
-	if err := c.writeControl(ctx, ControlMsg{Type: MsgTypeAuth, SUiAddress: c.suiAddress}); err != nil {
+	// Wait for challenge nonce from relay
+	challengeMsg, err := c.readControl(ctx)
+	if err != nil {
+		conn.CloseNow()
+		return "", fmt.Errorf("read challenge: %w", err)
+	}
+	if challengeMsg.Type != MsgTypeChallenge || challengeMsg.Nonce == "" {
+		conn.CloseNow()
+		return "", fmt.Errorf("expected challenge, got %s", challengeMsg.Type)
+	}
+
+	// Sign the challenge nonce
+	nonceBytes, err := hex.DecodeString(challengeMsg.Nonce)
+	if err != nil {
+		conn.CloseNow()
+		return "", fmt.Errorf("decode nonce: %w", err)
+	}
+	sig := c.signer.Sign(nonceBytes)
+	pubKey := c.signer.PublicKeyBytes()
+
+	// Send signed auth response
+	if err := c.writeControl(ctx, ControlMsg{
+		Type:       MsgTypeAuth,
+		SUiAddress: c.suiAddress,
+		PublicKey:  hex.EncodeToString(pubKey),
+		Signature:  hex.EncodeToString(sig),
+	}); err != nil {
 		conn.CloseNow()
 		return "", fmt.Errorf("send auth: %w", err)
 	}
