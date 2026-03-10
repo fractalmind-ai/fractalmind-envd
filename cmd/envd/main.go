@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 	"github.com/fractalmind-ai/fractalmind-envd/internal/config"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/heartbeat"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/relay"
+	"github.com/fractalmind-ai/fractalmind-envd/internal/relaypicker"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/roles"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/sponsor"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/sui"
@@ -174,10 +176,16 @@ func main() {
 	var wssClient *relay.WSSClient
 
 	if activeRoles.Relay {
+		// Extract bare IP from "ip:port" endpoint
+		relayIP := activeRoles.PublicEndpoint
+		if host, _, err := net.SplitHostPort(relayIP); err == nil {
+			relayIP = host
+		}
+
 		// Combined STUN + Relay on shared UDP port
 		relayServer = relay.NewServer(relay.Config{
 			ListenPort:     cfg.Relay.ListenPort,
-			PublicIP:       activeRoles.PublicEndpoint,
+			PublicIP:       relayIP,
 			MaxConnections: cfg.Relay.MaxConnections,
 		})
 		if err := relayServer.Start(); err != nil {
@@ -188,15 +196,7 @@ func main() {
 
 		// Start WSS relay handler if tcp_fallback config is present
 		if cfg.Relay.TCPFallback && activeRoles.PublicEndpoint != "" {
-			publicIP := activeRoles.PublicEndpoint
-			// Extract IP from "ip:port"
-			for i := len(publicIP) - 1; i >= 0; i-- {
-				if publicIP[i] == ':' {
-					publicIP = publicIP[:i]
-					break
-				}
-			}
-			wssHandler = relay.NewWSSHandler(publicIP, cfg.Relay.WSSPortMin, cfg.Relay.WSSPortMax)
+			wssHandler = relay.NewWSSHandler(relayIP, cfg.Relay.WSSPortMin, cfg.Relay.WSSPortMax)
 			mux := http.NewServeMux()
 			mux.Handle("/wg-relay", wssHandler)
 			wssAddr := fmt.Sprintf(":%d", cfg.Relay.WSSListenPort)
@@ -230,23 +230,47 @@ func main() {
 	}
 
 	// ======= WSS relay client (for UDP-restricted nodes) =======
-	if activeRoles.TCPFallbackActive && cfg.Relay.RelayURL != "" && suiClient != nil {
-		wssClient = relay.NewWSSClient(
-			cfg.Relay.RelayURL,
-			suiClient.Address(),
-			suiClient.Keypair(),
-			fmt.Sprintf("127.0.0.1:%d", cfg.WireGuard.ListenPort),
-		)
-		ctx := context.Background()
-		relayEndpoint, err := wssClient.Connect(ctx)
-		if err != nil {
-			log.Printf("[wss-client] failed to connect to relay: %v", err)
-			wssClient = nil
+	if activeRoles.TCPFallbackActive && suiClient != nil {
+		relayURL := cfg.Relay.RelayURL
+
+		// Auto-discover relay from SUI chain when no relay_url configured
+		if relayURL == "" {
+			ctx := context.Background()
+			peers, err := suiClient.QueryPeers(ctx)
+			if err != nil {
+				log.Printf("[wss-client] failed to query peers for relay discovery: %v", err)
+			} else {
+				picker := relaypicker.NewPicker(cfg.SUI.OrgID, cfg.Relay.Region, cfg.Relay.ISP, relaypicker.NewRelayLoadCache())
+				candidates := picker.SelectBest(peers, 1)
+				if len(candidates) > 0 && candidates[0].Peer.RelayAddr != "" {
+					relayURL = fmt.Sprintf("wss://%s/wg-relay", candidates[0].Peer.RelayAddr)
+					log.Printf("[wss-client] auto-discovered relay: %s (score=%d)", relayURL, candidates[0].Score)
+				} else {
+					log.Printf("[wss-client] no suitable relay found via SUI chain")
+				}
+			}
 		} else {
-			log.Printf("[wss-client] connected via WSS relay, endpoint: %s", relayEndpoint)
-			// Update SUI registration with the relay endpoint
-			if err := suiClient.UpdateEndpoints(ctx, []string{relayEndpoint}); err != nil {
-				log.Printf("[wss-client] failed to update SUI endpoint: %v", err)
+			log.Printf("[wss-client] using configured relay_url: %s", relayURL)
+		}
+
+		if relayURL != "" {
+			wssClient = relay.NewWSSClient(
+				relayURL,
+				suiClient.Address(),
+				suiClient.Keypair(),
+				fmt.Sprintf("127.0.0.1:%d", cfg.WireGuard.ListenPort),
+			)
+			ctx := context.Background()
+			relayEndpoint, err := wssClient.Connect(ctx)
+			if err != nil {
+				log.Printf("[wss-client] failed to connect to relay: %v", err)
+				wssClient = nil
+			} else {
+				log.Printf("[wss-client] connected via WSS relay, endpoint: %s", relayEndpoint)
+				// Update SUI registration with the relay endpoint
+				if err := suiClient.UpdateEndpoints(ctx, []string{relayEndpoint}); err != nil {
+					log.Printf("[wss-client] failed to update SUI endpoint: %v", err)
+				}
 			}
 		}
 	}

@@ -116,16 +116,16 @@ func TestResolve_TCPFallback_Activated(t *testing.T) {
 	}
 }
 
-func TestResolve_TCPFallback_NotActivated_NoRelayURL(t *testing.T) {
+func TestResolve_TCPFallback_Activated_NoRelayURL(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.STUN.Enabled = false
 	cfg.Relay.TCPFallback = true
-	cfg.Relay.RelayURL = "" // empty relay URL
+	cfg.Relay.RelayURL = "" // empty relay URL — auto-discovery will find relay from SUI chain
 
 	r := Resolve(cfg)
 
-	if r.TCPFallbackActive {
-		t.Error("TCPFallbackActive should be false when relay_url is empty")
+	if !r.TCPFallbackActive {
+		t.Error("TCPFallbackActive should be true even without relay_url (auto-discovery)")
 	}
 }
 
