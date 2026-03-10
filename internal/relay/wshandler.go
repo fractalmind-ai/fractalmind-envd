@@ -358,7 +358,7 @@ func verifyAuth(msg ControlMsg, nonce []byte) error {
 	derivedAddr := "0x" + hex.EncodeToString(hash[:])
 
 	if derivedAddr != msg.SUiAddress {
-		return fmt.Errorf("address mismatch: derived %s, claimed %s", derivedAddr[:16], msg.SUiAddress[:16])
+		return fmt.Errorf("address mismatch: derived %s, claimed %s", truncAddr(derivedAddr), truncAddr(msg.SUiAddress))
 	}
 
 	return nil
@@ -398,4 +398,12 @@ func (h *WSSHandler) Close() {
 		h.usedPort[alloc.udpPort] = false
 		delete(h.clients, addr)
 	}
+}
+
+// truncAddr safely truncates an address string for log/error messages.
+func truncAddr(s string) string {
+	if len(s) > 16 {
+		return s[:16]
+	}
+	return s
 }
