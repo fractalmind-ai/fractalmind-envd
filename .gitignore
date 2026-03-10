@@ -32,3 +32,6 @@ Thumbs.db
 # Config (local)
 sentinel.yaml
 *.local.yaml
+
+# Worktrees
+.worktrees/
