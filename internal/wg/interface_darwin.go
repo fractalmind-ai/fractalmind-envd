@@ -39,3 +39,32 @@ func ensureInterface(name string) error {
 	log.Printf("[wg] created interface %s (via wireguard-go)", name)
 	return nil
 }
+
+// assignInterfaceAddr assigns a CIDR address to a network interface on macOS.
+// Uses ifconfig to set a point-to-point address and adds a route for the /16 subnet.
+func assignInterfaceAddr(name, cidr string) error {
+	// Parse IP from CIDR
+	ip := cidr
+	if idx := strings.Index(cidr, "/"); idx >= 0 {
+		ip = cidr[:idx]
+	}
+
+	// Check if already assigned
+	out, err := exec.Command("ifconfig", name).CombinedOutput()
+	if err == nil && strings.Contains(string(out), ip) {
+		return nil
+	}
+
+	// Set point-to-point address: ifconfig <name> inet <ip> <ip> netmask 255.255.0.0
+	if out, err := exec.Command("ifconfig", name, "inet", ip, ip, "netmask", "255.255.0.0").CombinedOutput(); err != nil {
+		return fmt.Errorf("ifconfig %s inet %s: %s (%w)", name, ip, string(out), err)
+	}
+
+	// Add route for the 10.87.0.0/16 subnet
+	if out, err := exec.Command("route", "add", "-net", "10.87.0.0/16", "-interface", name).CombinedOutput(); err != nil {
+		// Route may already exist; log but don't fail
+		log.Printf("[wg] route add warning: %s", string(out))
+	}
+
+	return nil
+}

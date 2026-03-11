@@ -40,11 +40,12 @@ func newTestManager(t *testing.T, mock *mockWG) *Manager {
 			InterfaceName: "wg-test",
 			ListenPort:    51820,
 		},
-		wg:              mock,
-		privateKey:      key,
-		publicKey:       key.PublicKey(),
-		ensureInterface: func(string) error { return nil },
-		peers:           make(map[string]wgtypes.Key),
+		wg:                  mock,
+		privateKey:          key,
+		publicKey:           key.PublicKey(),
+		ensureInterface:     func(string) error { return nil },
+		assignInterfaceAddr: func(string, string) error { return nil },
+		peers:               make(map[string]wgtypes.Key),
 	}
 }
 
@@ -113,16 +114,20 @@ func TestSyncPeers(t *testing.T) {
 	addr1 := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	addr2 := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
-	// Add initial peer
-	if err := mgr.AddPeer(addr1, make([]byte, 32), []string{"1.1.1.1:51820"}); err != nil {
+	// Add initial peer (non-zero key)
+	key1 := make([]byte, 32)
+	key1[0] = 0x01
+	if err := mgr.AddPeer(addr1, key1, []string{"1.1.1.1:51820"}); err != nil {
 		t.Fatalf("AddPeer: %v", err)
 	}
 
 	// Sync with new set (addr2 new, addr1 should be removed)
+	key2 := make([]byte, 32)
+	key2[0] = 0x02
 	newPeers := []sui.PeerInfo{
 		{
 			Address:         addr2,
-			WireGuardPubKey: make([]byte, 32),
+			WireGuardPubKey: key2,
 			Endpoints:       []string{"2.2.2.2:51820"},
 		},
 	}
@@ -139,19 +144,43 @@ func TestSyncPeers(t *testing.T) {
 	}
 }
 
+func TestSyncPeersSkipsZeroKey(t *testing.T) {
+	mock := &mockWG{}
+	mgr := newTestManager(t, mock)
+
+	addr := "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+	// Peer with all-zero WG key should be skipped
+	peers := []sui.PeerInfo{
+		{
+			Address:         addr,
+			WireGuardPubKey: make([]byte, 32), // all zeros
+			Endpoints:       []string{"3.3.3.3:51820"},
+		},
+	}
+
+	if err := mgr.SyncPeers(peers); err != nil {
+		t.Fatalf("SyncPeers: %v", err)
+	}
+
+	if _, ok := mgr.peers[addr]; ok {
+		t.Error("peer with zero WG key should not have been added")
+	}
+}
+
 func TestVPNAddress(t *testing.T) {
 	addr := "0xdeadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
 
 	vpnAddr := VPNAddress(addr)
 
-	// Should be in 10.100.0.0/16 range
+	// Should be in 10.87.0.0/16 range
 	if !vpnAddr.Is4() {
 		t.Error("VPN address should be IPv4")
 	}
 
 	octets := vpnAddr.As4()
-	if octets[0] != 10 || octets[1] != 100 {
-		t.Errorf("VPN address should start with 10.100, got %v", vpnAddr)
+	if octets[0] != 10 || octets[1] != 87 {
+		t.Errorf("VPN address should start with 10.87, got %v", vpnAddr)
 	}
 
 	// Deterministic — same input should produce same output
@@ -172,12 +201,44 @@ func TestVPNAddressAvoidsBoundary(t *testing.T) {
 	// Test that we never get 0 for X or Y octets
 	// This is a statistical test — we test many addresses
 	for i := 0; i < 1000; i++ {
-		addr := netip.AddrFrom4([4]byte{10, 100, byte(i / 256), byte(i % 256)}).String()
+		addr := netip.AddrFrom4([4]byte{10, 87, byte(i / 256), byte(i % 256)}).String()
 		vpn := VPNAddress(addr)
 		octets := vpn.As4()
 		if octets[2] == 0 || octets[3] == 0 {
 			t.Errorf("VPN address %v has zero octet for input %s", vpn, addr)
 		}
+	}
+}
+
+func TestAssignIP(t *testing.T) {
+	mock := &mockWG{}
+	var assignedName, assignedCIDR string
+	mgr := newTestManager(t, mock)
+	mgr.assignInterfaceAddr = func(name, cidr string) error {
+		assignedName = name
+		assignedCIDR = cidr
+		return nil
+	}
+
+	suiAddr := "0xdeadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+	if err := mgr.AssignIP(suiAddr); err != nil {
+		t.Fatalf("AssignIP: %v", err)
+	}
+
+	if assignedName != "wg-test" {
+		t.Errorf("expected interface name wg-test, got %s", assignedName)
+	}
+
+	expectedIP := VPNAddress(suiAddr).String() + "/16"
+	if assignedCIDR != expectedIP {
+		t.Errorf("expected CIDR %s, got %s", expectedIP, assignedCIDR)
+	}
+
+	// Verify the assigned IP is in the 10.87.0.0/16 range
+	vpn := VPNAddress(suiAddr)
+	octets := vpn.As4()
+	if octets[0] != 10 || octets[1] != 87 {
+		t.Errorf("assigned IP should be in 10.87.0.0/16, got %v", vpn)
 	}
 }
 

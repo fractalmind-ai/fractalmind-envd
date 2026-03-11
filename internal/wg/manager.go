@@ -25,12 +25,13 @@ type WGConfigurator interface {
 
 // Manager manages the WireGuard interface and peer configuration.
 type Manager struct {
-	mu              sync.Mutex
-	cfg             config.WireGuardConfig
-	wg              WGConfigurator
-	privateKey      wgtypes.Key
-	publicKey       wgtypes.Key
-	ensureInterface func(name string) error
+	mu                  sync.Mutex
+	cfg                 config.WireGuardConfig
+	wg                  WGConfigurator
+	privateKey          wgtypes.Key
+	publicKey           wgtypes.Key
+	ensureInterface     func(name string) error
+	assignInterfaceAddr func(name, cidr string) error
 	// suiAddr → wg public key mapping for tracked peers
 	peers map[string]wgtypes.Key
 }
@@ -46,12 +47,13 @@ func NewManager(cfg config.WireGuardConfig, wg WGConfigurator) (*Manager, error)
 	log.Printf("[wg] public key: %s", pubKey.String())
 
 	return &Manager{
-		cfg:             cfg,
-		wg:              wg,
-		privateKey:      key,
-		publicKey:       pubKey,
-		ensureInterface: ensureInterface,
-		peers:           make(map[string]wgtypes.Key),
+		cfg:                 cfg,
+		wg:                  wg,
+		privateKey:          key,
+		publicKey:           pubKey,
+		ensureInterface:     ensureInterface,
+		assignInterfaceAddr: assignInterfaceAddr,
+		peers:               make(map[string]wgtypes.Key),
 	}, nil
 }
 
@@ -90,8 +92,8 @@ func (m *Manager) AddPeer(suiAddr string, pubkey []byte, endpoints []string) err
 
 	peerCfg := wgtypes.PeerConfig{
 		PublicKey:                   peerKey,
-		ReplaceAllowedIPs:          true,
-		AllowedIPs:                 []net.IPNet{vpnIPNet(suiAddr)},
+		ReplaceAllowedIPs:           true,
+		AllowedIPs:                  []net.IPNet{vpnIPNet(suiAddr)},
 		PersistentKeepaliveInterval: ptrDuration(25 * time.Second),
 	}
 
@@ -129,7 +131,7 @@ func (m *Manager) RemovePeer(suiAddr string) error {
 		Peers: []wgtypes.PeerConfig{
 			{
 				PublicKey: peerKey,
-				Remove:   true,
+				Remove:    true,
 			},
 		},
 	})
@@ -199,6 +201,10 @@ func (m *Manager) SyncPeers(peers []sui.PeerInfo) error {
 
 	// Add missing or update changed peers
 	for addr, p := range desired {
+		if isZeroKey(p.WireGuardPubKey) {
+			log.Printf("[wg] skipping peer %s: no WireGuard key", addr[:10])
+			continue
+		}
 		if _, tracked := m.peers[addr]; !tracked {
 			if err := m.AddPeer(addr, p.WireGuardPubKey, p.Endpoints); err != nil {
 				log.Printf("[wg] failed to add peer %s: %v", addr[:10], err)
@@ -231,8 +237,20 @@ func (m *Manager) Close() error {
 	return m.wg.Close()
 }
 
+// AssignIP assigns a deterministic VPN IP to the WireGuard interface based on
+// the node's SUI address. The IP is derived via VPNAddress(suiAddr).
+func (m *Manager) AssignIP(suiAddr string) error {
+	addr := VPNAddress(suiAddr)
+	cidr := addr.String() + "/16"
+	if err := m.assignInterfaceAddr(m.cfg.InterfaceName, cidr); err != nil {
+		return fmt.Errorf("assign IP %s: %w", cidr, err)
+	}
+	log.Printf("[wg] assigned %s to %s", cidr, m.cfg.InterfaceName)
+	return nil
+}
+
 // VPNAddress returns the deterministic VPN IP for a SUI address.
-// Uses SHA256(suiAddr) mapped to 10.100.X.Y/32.
+// Uses SHA256(suiAddr) mapped to 10.87.X.Y/32.
 func VPNAddress(suiAddr string) netip.Addr {
 	hash := sha256.Sum256([]byte(suiAddr))
 	x := hash[0]
@@ -243,7 +261,7 @@ func VPNAddress(suiAddr string) netip.Addr {
 	if y == 0 {
 		y = 1
 	}
-	return netip.AddrFrom4([4]byte{10, 100, x, y})
+	return netip.AddrFrom4([4]byte{10, 87, x, y})
 }
 
 func vpnIPNet(suiAddr string) net.IPNet {
@@ -257,6 +275,19 @@ func vpnIPNet(suiAddr string) net.IPNet {
 
 func ptrDuration(d time.Duration) *time.Duration {
 	return &d
+}
+
+// isZeroKey returns true if the WireGuard public key is empty or all zeros.
+func isZeroKey(key []byte) bool {
+	if len(key) == 0 {
+		return true
+	}
+	for _, b := range key {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func loadOrGenerateWGKey(path string) (wgtypes.Key, error) {

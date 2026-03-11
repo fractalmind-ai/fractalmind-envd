@@ -33,9 +33,10 @@ type ControlMsg struct {
 	Nonce string `json:"nonce,omitempty"` // hex-encoded random challenge
 
 	// Auth fields (client → relay)
-	SUiAddress string `json:"sui_address,omitempty"`
-	PublicKey  string `json:"public_key,omitempty"` // hex-encoded Ed25519 public key
-	Signature  string `json:"signature,omitempty"`  // hex-encoded Ed25519 signature of nonce
+	SUiAddress  string `json:"sui_address,omitempty"`
+	PublicKey   string `json:"public_key,omitempty"`    // hex-encoded Ed25519 public key
+	Signature   string `json:"signature,omitempty"`     // hex-encoded Ed25519 signature of nonce
+	WGPublicKey string `json:"wg_public_key,omitempty"` // hex-encoded WireGuard public key
 
 	// Allocated fields (relay → client)
 	Endpoint string `json:"endpoint,omitempty"`

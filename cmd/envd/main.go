@@ -140,6 +140,13 @@ func main() {
 			log.Fatalf("failed to create sui client: %v", err)
 		}
 
+		// Assign deterministic VPN IP to WireGuard interface
+		if wgManager != nil {
+			if err := wgManager.AssignIP(suiClient.Address()); err != nil {
+				log.Printf("[wg] WARNING: failed to assign VPN IP: %v", err)
+			}
+		}
+
 		// Gas top-up: sponsor wallet funds envd node for direct SUI execution
 		if sponsorSvc != nil {
 			ctx := context.Background()
@@ -153,6 +160,10 @@ func main() {
 		var wgPubKey []byte
 		if wgManager != nil {
 			wgPubKey = wgManager.PublicKey()
+		}
+		if len(wgPubKey) != 32 {
+			log.Printf("[wg] WARNING: WireGuard public key missing or invalid (%d bytes), using zero-filled key", len(wgPubKey))
+			wgPubKey = make([]byte, 32)
 		}
 		if err := suiClient.RegisterPeer(ctx, wgPubKey, endpoints, cfg.Identity.Hostname); err != nil {
 			log.Printf("[sui] peer registration failed: %v", err)
@@ -197,6 +208,27 @@ func main() {
 		// Start WSS relay handler if tcp_fallback config is present
 		if cfg.Relay.TCPFallback && activeRoles.PublicEndpoint != "" {
 			wssHandler = relay.NewWSSHandler(relayIP, cfg.Relay.WSSPortMin, cfg.Relay.WSSPortMax)
+
+			// Wire relay-WG bridge callbacks: when a WSS client connects,
+			// add its WG peer entry on this relay node so mesh traffic flows.
+			if wgManager != nil {
+				wssHandler.OnPeerConnected = func(suiAddr string, wgPubKey []byte, allocatedPort int) {
+					endpoint := fmt.Sprintf("127.0.0.1:%d", allocatedPort)
+					if err := wgManager.AddPeer(suiAddr, wgPubKey, []string{endpoint}); err != nil {
+						log.Printf("[wss-relay] failed to add WG peer for %s: %v", truncAddr(suiAddr), err)
+					} else {
+						log.Printf("[wss-relay] added WG peer for %s (endpoint=%s)", truncAddr(suiAddr), endpoint)
+					}
+				}
+				wssHandler.OnPeerDisconnected = func(suiAddr string) {
+					if err := wgManager.RemovePeer(suiAddr); err != nil {
+						log.Printf("[wss-relay] failed to remove WG peer for %s: %v", truncAddr(suiAddr), err)
+					} else {
+						log.Printf("[wss-relay] removed WG peer for %s", truncAddr(suiAddr))
+					}
+				}
+			}
+
 			mux := http.NewServeMux()
 			mux.Handle("/wg-relay", wssHandler)
 			wssAddr := fmt.Sprintf(":%d", cfg.Relay.WSSListenPort)
@@ -228,6 +260,10 @@ func main() {
 				log.Printf("[sui] relay registration failed: %v", err)
 			}
 		}
+
+		// Enable IP forwarding on the relay node so mesh traffic between
+		// WSS clients can be routed through the WireGuard interface.
+		wg.EnableIPForward(cfg.WireGuard.InterfaceName)
 	} else if activeRoles.StunServer {
 		// STUN-only server (no relay capability)
 		stunOnlyServer = relay.NewStunOnlyServer(cfg.Relay.ListenPort)
@@ -273,6 +309,9 @@ func main() {
 				suiClient.Keypair(),
 				fmt.Sprintf("127.0.0.1:%d", cfg.WireGuard.ListenPort),
 			)
+			if wgManager != nil {
+				wssClient.SetWGPublicKey(wgManager.PublicKey())
+			}
 			ctx := context.Background()
 			relayEndpoint, err := wssClient.Connect(ctx)
 			if err != nil {
