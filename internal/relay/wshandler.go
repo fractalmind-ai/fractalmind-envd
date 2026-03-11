@@ -114,13 +114,19 @@ func (h *WSSHandler) handleClient(ctx context.Context, conn *websocket.Conn) {
 	suiAddr := authMsg.SUiAddress
 	log.Printf("[wss-relay] client authenticated: %s", suiAddr[:16])
 
-	// Decode WireGuard public key from auth message (optional)
+	// Decode and validate WireGuard public key from auth message (optional).
+	// Must be exactly 32 bytes and non-zero to be accepted.
 	var wgPubKey []byte
 	if authMsg.WGPublicKey != "" {
-		wgPubKey, err = hex.DecodeString(authMsg.WGPublicKey)
-		if err != nil {
-			log.Printf("[wss-relay] invalid wg_public_key from %s: %v", suiAddr[:16], err)
-			wgPubKey = nil
+		decoded, decErr := hex.DecodeString(authMsg.WGPublicKey)
+		if decErr != nil {
+			log.Printf("[wss-relay] invalid wg_public_key hex from %s: %v", suiAddr[:16], decErr)
+		} else if len(decoded) != 32 {
+			log.Printf("[wss-relay] rejecting wg_public_key from %s: expected 32 bytes, got %d", suiAddr[:16], len(decoded))
+		} else if isZeroWGKey(decoded) {
+			log.Printf("[wss-relay] rejecting wg_public_key from %s: all-zero key", suiAddr[:16])
+		} else {
+			wgPubKey = decoded
 		}
 	}
 
@@ -139,8 +145,9 @@ func (h *WSSHandler) handleClient(ctx context.Context, conn *websocket.Conn) {
 	h.writeControl(ctx, conn, ControlMsg{Type: MsgTypeAllocated, Endpoint: endpoint})
 	log.Printf("[wss-relay] allocated %s for %s", endpoint, suiAddr[:16])
 
-	// Notify relay node to add WG peer for this client
-	if h.OnPeerConnected != nil && len(wgPubKey) > 0 {
+	// Notify relay node to add WG peer for this client.
+	// wgPubKey is nil unless it passed all validation above (32 bytes, non-zero).
+	if h.OnPeerConnected != nil && len(wgPubKey) == 32 {
 		h.OnPeerConnected(suiAddr, wgPubKey, alloc.udpPort)
 	}
 
@@ -432,4 +439,14 @@ func truncAddr(s string) string {
 		return s[:16]
 	}
 	return s
+}
+
+// isZeroWGKey returns true if every byte in key is zero.
+func isZeroWGKey(key []byte) bool {
+	for _, b := range key {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }

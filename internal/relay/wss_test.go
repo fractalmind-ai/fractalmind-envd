@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -579,10 +580,10 @@ func TestValidateTarget(t *testing.T) {
 		{"10.0.0.1:51820", false},
 		{"192.168.1.1:51820", false},
 		{"8.8.8.8:443", false},
-		{"127.0.0.1:51820", true},  // loopback
-		{"0.0.0.0:51820", true},    // unspecified
-		{"not-ip:1234", true},      // invalid IP
-		{"badformat", true},        // no port
+		{"127.0.0.1:51820", true}, // loopback
+		{"0.0.0.0:51820", true},   // unspecified
+		{"not-ip:1234", true},     // invalid IP
+		{"badformat", true},       // no port
 	}
 
 	for _, tt := range tests {
@@ -688,4 +689,259 @@ func findFreePort(t *testing.T) int {
 	port := conn.LocalAddr().(*net.UDPAddr).Port
 	conn.Close()
 	return port
+}
+
+// doAuthWithWGKey performs the auth handshake and includes a WG public key.
+func doAuthWithWGKey(t *testing.T, ctx context.Context, conn *websocket.Conn, signer *testSigner, wgKeyHex string) {
+	t.Helper()
+
+	typ, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read challenge: %v", err)
+	}
+	if typ != websocket.MessageText {
+		t.Fatalf("expected text, got %v", typ)
+	}
+	var challenge ControlMsg
+	if err := json.Unmarshal(data, &challenge); err != nil {
+		t.Fatalf("unmarshal challenge: %v", err)
+	}
+	if challenge.Type != MsgTypeChallenge {
+		t.Fatalf("expected challenge, got %q", challenge.Type)
+	}
+
+	nonceBytes, _ := hex.DecodeString(challenge.Nonce)
+	sig := signer.Sign(nonceBytes)
+	authMsg := ControlMsg{
+		Type:        MsgTypeAuth,
+		SUiAddress:  signer.suiAddress(),
+		PublicKey:   hex.EncodeToString(signer.PublicKeyBytes()),
+		Signature:   hex.EncodeToString(sig),
+		WGPublicKey: wgKeyHex,
+	}
+	authData, _ := json.Marshal(authMsg)
+	if err := conn.Write(ctx, websocket.MessageText, authData); err != nil {
+		t.Fatalf("write auth: %v", err)
+	}
+}
+
+func TestWSSHandler_CallbackFiredForValidWGKey(t *testing.T) {
+	freePort := findFreePort(t)
+	h := NewWSSHandler("127.0.0.1", freePort, freePort)
+
+	type callbackResult struct {
+		key  []byte
+		port int
+	}
+	callbackCh := make(chan callbackResult, 1)
+	h.OnPeerConnected = func(suiAddr string, wgPubKey []byte, allocatedPort int) {
+		callbackCh <- callbackResult{key: wgPubKey, port: allocatedPort}
+	}
+
+	server := httptest.NewServer(h)
+	defer server.Close()
+	defer h.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	// Valid 32-byte key
+	validKey := make([]byte, 32)
+	validKey[0] = 0x42
+	validKey[31] = 0xFF
+
+	signer := newTestSigner(t)
+	doAuthWithWGKey(t, ctx, conn, signer, hex.EncodeToString(validKey))
+
+	// Read allocated
+	_, respData, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read allocated: %v", err)
+	}
+	var resp ControlMsg
+	json.Unmarshal(respData, &resp)
+	if resp.Type != MsgTypeAllocated {
+		t.Fatalf("expected allocated, got %q", resp.Type)
+	}
+
+	select {
+	case result := <-callbackCh:
+		if len(result.key) != 32 {
+			t.Errorf("received key should be 32 bytes, got %d", len(result.key))
+		}
+		if result.port != freePort {
+			t.Errorf("received port = %d, want %d", result.port, freePort)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("OnPeerConnected should be fired for valid 32-byte WG key")
+	}
+}
+
+func TestWSSHandler_CallbackNotFiredForZeroWGKey(t *testing.T) {
+	freePort := findFreePort(t)
+	h := NewWSSHandler("127.0.0.1", freePort, freePort)
+
+	callbackCh := make(chan struct{}, 1)
+	h.OnPeerConnected = func(suiAddr string, wgPubKey []byte, allocatedPort int) {
+		callbackCh <- struct{}{}
+	}
+
+	server := httptest.NewServer(h)
+	defer server.Close()
+	defer h.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	// All-zero 32-byte key
+	zeroKey := make([]byte, 32)
+
+	signer := newTestSigner(t)
+	doAuthWithWGKey(t, ctx, conn, signer, hex.EncodeToString(zeroKey))
+
+	_, respData, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var resp ControlMsg
+	json.Unmarshal(respData, &resp)
+	if resp.Type != MsgTypeAllocated {
+		t.Fatalf("expected allocated, got %q", resp.Type)
+	}
+
+	select {
+	case <-callbackCh:
+		t.Error("OnPeerConnected should NOT be fired for all-zero WG key")
+	case <-time.After(200 * time.Millisecond):
+		// expected: callback not fired
+	}
+}
+
+func TestWSSHandler_CallbackNotFiredForShortWGKey(t *testing.T) {
+	freePort := findFreePort(t)
+	h := NewWSSHandler("127.0.0.1", freePort, freePort)
+
+	callbackCh := make(chan struct{}, 1)
+	h.OnPeerConnected = func(suiAddr string, wgPubKey []byte, allocatedPort int) {
+		callbackCh <- struct{}{}
+	}
+
+	server := httptest.NewServer(h)
+	defer server.Close()
+	defer h.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	// Short key (16 bytes instead of 32)
+	shortKey := make([]byte, 16)
+	shortKey[0] = 0x42
+
+	signer := newTestSigner(t)
+	doAuthWithWGKey(t, ctx, conn, signer, hex.EncodeToString(shortKey))
+
+	_, respData, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var resp ControlMsg
+	json.Unmarshal(respData, &resp)
+	if resp.Type != MsgTypeAllocated {
+		t.Fatalf("expected allocated, got %q", resp.Type)
+	}
+
+	select {
+	case <-callbackCh:
+		t.Error("OnPeerConnected should NOT be fired for short WG key")
+	case <-time.After(200 * time.Millisecond):
+		// expected: callback not fired
+	}
+}
+
+func TestWSSHandler_CallbackNotFiredForNoWGKey(t *testing.T) {
+	freePort := findFreePort(t)
+	h := NewWSSHandler("127.0.0.1", freePort, freePort)
+
+	callbackCh := make(chan struct{}, 1)
+	h.OnPeerConnected = func(suiAddr string, wgPubKey []byte, allocatedPort int) {
+		callbackCh <- struct{}{}
+	}
+
+	server := httptest.NewServer(h)
+	defer server.Close()
+	defer h.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	// No WG key at all (empty string)
+	signer := newTestSigner(t)
+	doAuthWithWGKey(t, ctx, conn, signer, "")
+
+	_, respData, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var resp ControlMsg
+	json.Unmarshal(respData, &resp)
+	if resp.Type != MsgTypeAllocated {
+		t.Fatalf("expected allocated, got %q", resp.Type)
+	}
+
+	select {
+	case <-callbackCh:
+		t.Error("OnPeerConnected should NOT be fired when no WG key provided")
+	case <-time.After(200 * time.Millisecond):
+		// expected: callback not fired
+	}
+}
+
+func TestIsZeroWGKey(t *testing.T) {
+	tests := []struct {
+		name string
+		key  []byte
+		want bool
+	}{
+		{"all zeros", make([]byte, 32), true},
+		{"empty", []byte{}, true},
+		{"non-zero first byte", append([]byte{0x01}, make([]byte, 31)...), false},
+		{"non-zero last byte", append(make([]byte, 31), 0x01), false},
+		{"all 0xFF", bytes.Repeat([]byte{0xFF}, 32), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isZeroWGKey(tt.key); got != tt.want {
+				t.Errorf("isZeroWGKey() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

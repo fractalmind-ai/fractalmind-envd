@@ -46,6 +46,7 @@ func newTestManager(t *testing.T, mock *mockWG) *Manager {
 		ensureInterface:     func(string) error { return nil },
 		assignInterfaceAddr: func(string, string) error { return nil },
 		peers:               make(map[string]wgtypes.Key),
+		vpnIPs:              make(map[netip.Addr]string),
 	}
 }
 
@@ -171,7 +172,7 @@ func TestSyncPeersSkipsZeroKey(t *testing.T) {
 func TestVPNAddress(t *testing.T) {
 	addr := "0xdeadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
 
-	vpnAddr := VPNAddress(addr)
+	vpnAddr := VPNAddress(addr, 0)
 
 	// Should be in 10.87.0.0/16 range
 	if !vpnAddr.Is4() {
@@ -184,14 +185,14 @@ func TestVPNAddress(t *testing.T) {
 	}
 
 	// Deterministic — same input should produce same output
-	vpnAddr2 := VPNAddress(addr)
+	vpnAddr2 := VPNAddress(addr, 0)
 	if vpnAddr != vpnAddr2 {
 		t.Error("VPN address should be deterministic")
 	}
 
 	// Different address should produce different VPN IP (overwhelmingly likely)
 	differentAddr := "0x1111111111111111111111111111111111111111111111111111111111111111"
-	vpnAddr3 := VPNAddress(differentAddr)
+	vpnAddr3 := VPNAddress(differentAddr, 0)
 	if vpnAddr == vpnAddr3 {
 		t.Error("different SUI addresses should produce different VPN IPs")
 	}
@@ -202,7 +203,7 @@ func TestVPNAddressAvoidsBoundary(t *testing.T) {
 	// This is a statistical test — we test many addresses
 	for i := 0; i < 1000; i++ {
 		addr := netip.AddrFrom4([4]byte{10, 87, byte(i / 256), byte(i % 256)}).String()
-		vpn := VPNAddress(addr)
+		vpn := VPNAddress(addr, 0)
 		octets := vpn.As4()
 		if octets[2] == 0 || octets[3] == 0 {
 			t.Errorf("VPN address %v has zero octet for input %s", vpn, addr)
@@ -229,13 +230,13 @@ func TestAssignIP(t *testing.T) {
 		t.Errorf("expected interface name wg-test, got %s", assignedName)
 	}
 
-	expectedIP := VPNAddress(suiAddr).String() + "/16"
+	expectedIP := VPNAddress(suiAddr, 0).String() + "/16"
 	if assignedCIDR != expectedIP {
 		t.Errorf("expected CIDR %s, got %s", expectedIP, assignedCIDR)
 	}
 
 	// Verify the assigned IP is in the 10.87.0.0/16 range
-	vpn := VPNAddress(suiAddr)
+	vpn := VPNAddress(suiAddr, 0)
 	octets := vpn.As4()
 	if octets[0] != 10 || octets[1] != 87 {
 		t.Errorf("assigned IP should be in 10.87.0.0/16, got %v", vpn)
@@ -247,7 +248,9 @@ func TestClose(t *testing.T) {
 	mgr := newTestManager(t, mock)
 
 	addr := "0xdeadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
-	if err := mgr.AddPeer(addr, make([]byte, 32), nil); err != nil {
+	key := make([]byte, 32)
+	key[0] = 0x42
+	if err := mgr.AddPeer(addr, key, nil); err != nil {
 		t.Fatalf("AddPeer: %v", err)
 	}
 
@@ -261,5 +264,180 @@ func TestClose(t *testing.T) {
 
 	if len(mgr.peers) != 0 {
 		t.Error("all peers should be removed after close")
+	}
+}
+
+// --- Fix 1: WG key validation edge cases ---
+
+func TestAddPeerRejectsShortKey(t *testing.T) {
+	mock := &mockWG{}
+	mgr := newTestManager(t, mock)
+
+	addr := "0xdeadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+	shortKey := make([]byte, 16) // too short
+	shortKey[0] = 0x01
+
+	err := mgr.AddPeer(addr, shortKey, []string{"1.2.3.4:51820"})
+	if err == nil {
+		t.Error("AddPeer should reject key shorter than 32 bytes")
+	}
+}
+
+func TestAddPeerRejectsZeroKey(t *testing.T) {
+	mock := &mockWG{}
+	mgr := newTestManager(t, mock)
+
+	addr := "0xdeadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+	zeroKey := make([]byte, 32) // all zeros
+
+	err := mgr.AddPeer(addr, zeroKey, []string{"1.2.3.4:51820"})
+	if err == nil {
+		t.Error("AddPeer should reject all-zero key")
+	}
+}
+
+func TestAddPeerRejectsEmptyKey(t *testing.T) {
+	mock := &mockWG{}
+	mgr := newTestManager(t, mock)
+
+	addr := "0xdeadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+
+	err := mgr.AddPeer(addr, nil, []string{"1.2.3.4:51820"})
+	if err == nil {
+		t.Error("AddPeer should reject nil key")
+	}
+
+	err = mgr.AddPeer(addr, []byte{}, []string{"1.2.3.4:51820"})
+	if err == nil {
+		t.Error("AddPeer should reject empty key")
+	}
+}
+
+func TestAddPeerRejectsOversizedKey(t *testing.T) {
+	mock := &mockWG{}
+	mgr := newTestManager(t, mock)
+
+	addr := "0xdeadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+	longKey := make([]byte, 64) // too long
+	longKey[0] = 0x01
+
+	err := mgr.AddPeer(addr, longKey, []string{"1.2.3.4:51820"})
+	if err == nil {
+		t.Error("AddPeer should reject key longer than 32 bytes")
+	}
+}
+
+func TestAddPeerAcceptsValid32ByteKey(t *testing.T) {
+	mock := &mockWG{}
+	mgr := newTestManager(t, mock)
+
+	addr := "0xdeadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+	validKey := make([]byte, 32)
+	validKey[0] = 0x42
+
+	err := mgr.AddPeer(addr, validKey, []string{"1.2.3.4:51820"})
+	if err != nil {
+		t.Fatalf("AddPeer should accept valid 32-byte key: %v", err)
+	}
+	if _, ok := mgr.peers[addr]; !ok {
+		t.Error("peer should be tracked after successful add")
+	}
+}
+
+// --- Fix 2: Collision detection ---
+
+func TestVPNAddressRehash(t *testing.T) {
+	addr := "0xdeadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+
+	// Different rounds should (usually) produce different IPs
+	ip0 := VPNAddress(addr, 0)
+	ip1 := VPNAddress(addr, 1)
+
+	// Same round should be deterministic
+	if VPNAddress(addr, 0) != ip0 {
+		t.Error("VPNAddress should be deterministic for same round")
+	}
+	if VPNAddress(addr, 1) != ip1 {
+		t.Error("VPNAddress should be deterministic for same round")
+	}
+
+	// All rounds should be in 10.87.0.0/16
+	for round := 0; round < 16; round++ {
+		ip := VPNAddress(addr, round)
+		octets := ip.As4()
+		if octets[0] != 10 || octets[1] != 87 {
+			t.Errorf("round %d: expected 10.87.x.y, got %v", round, ip)
+		}
+		if octets[2] == 0 || octets[3] == 0 {
+			t.Errorf("round %d: zero octet in %v", round, ip)
+		}
+	}
+}
+
+func TestCollisionDetection(t *testing.T) {
+	mock := &mockWG{}
+	mgr := newTestManager(t, mock)
+
+	// Manually pre-populate vpnIPs to force a collision on the first peer's IP
+	addr1 := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	addr2 := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	key1 := make([]byte, 32)
+	key1[0] = 0x01
+	key2 := make([]byte, 32)
+	key2[0] = 0x02
+
+	// Add first peer
+	if err := mgr.AddPeer(addr1, key1, nil); err != nil {
+		t.Fatalf("AddPeer(addr1): %v", err)
+	}
+
+	// Force a collision: set addr2's round-0 IP to be the same as addr1's
+	ip1 := VPNAddress(addr1, 0)
+	ip2r0 := VPNAddress(addr2, 0)
+
+	if ip1 == ip2r0 {
+		// Natural collision — addr2 should get rehashed
+		if err := mgr.AddPeer(addr2, key2, nil); err != nil {
+			t.Fatalf("AddPeer(addr2) with natural collision: %v", err)
+		}
+	} else {
+		// Force collision by stealing addr2's IP for a fake address
+		mgr.vpnIPs[ip2r0] = "0xfake_collision_addr_00000000000000000000000000000000000000000000"
+
+		if err := mgr.AddPeer(addr2, key2, nil); err != nil {
+			t.Fatalf("AddPeer(addr2) with forced collision: %v", err)
+		}
+
+		// addr2 should have gotten a different IP via rehash
+		var addr2IP netip.Addr
+		for ip, owner := range mgr.vpnIPs {
+			if owner == addr2 {
+				addr2IP = ip
+				break
+			}
+		}
+		if addr2IP == ip2r0 {
+			t.Error("addr2 should have been rehashed to a different IP")
+		}
+		if !addr2IP.IsValid() {
+			t.Error("addr2 should have a valid VPN IP after rehash")
+		}
+	}
+}
+
+func TestResolveVPNAddrReturnsSameIPForSameAddr(t *testing.T) {
+	mock := &mockWG{}
+	mgr := newTestManager(t, mock)
+
+	addr := "0xdeadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+
+	mgr.mu.Lock()
+	ip1 := mgr.resolveVPNAddr(addr)
+	ip2 := mgr.resolveVPNAddr(addr)
+	mgr.mu.Unlock()
+
+	if ip1 != ip2 {
+		t.Errorf("resolveVPNAddr should return same IP for same address: got %v and %v", ip1, ip2)
 	}
 }
