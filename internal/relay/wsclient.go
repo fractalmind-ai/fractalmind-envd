@@ -20,9 +20,10 @@ type WSSClient struct {
 	relayURL      string
 	suiAddress    string
 	signer        Signer
+	wgPubKey      []byte // WireGuard public key to send in auth
 	wgListenAddr  string // WireGuard's local UDP address (e.g., "127.0.0.1:51820")
 	conn          *websocket.Conn
-	relayEndpoint string              // Assigned public endpoint from relay
+	relayEndpoint string                // Assigned public endpoint from relay
 	peers         map[uint16]*proxyPeer // peer_id → local UDP proxy
 	nextPeerID    uint16
 	done          chan struct{}
@@ -30,11 +31,11 @@ type WSSClient struct {
 
 // proxyPeer tracks a local UDP proxy for one WireGuard peer.
 type proxyPeer struct {
-	id         uint16
-	target     string       // Real endpoint of the peer (for relay routing)
-	localConn  net.PacketConn // Local UDP socket (127.0.0.1:ephemeral)
-	localAddr  string       // "127.0.0.1:PORT" — set as WG peer endpoint
-	wgAddr     *net.UDPAddr // WireGuard's local address to send incoming packets to
+	id        uint16
+	target    string         // Real endpoint of the peer (for relay routing)
+	localConn net.PacketConn // Local UDP socket (127.0.0.1:ephemeral)
+	localAddr string         // "127.0.0.1:PORT" — set as WG peer endpoint
+	wgAddr    *net.UDPAddr   // WireGuard's local address to send incoming packets to
 }
 
 // NewWSSClient creates a WSS relay client.
@@ -49,6 +50,14 @@ func NewWSSClient(relayURL, suiAddress string, signer Signer, wgListenAddr strin
 		nextPeerID:   1,
 		done:         make(chan struct{}),
 	}
+}
+
+// SetWGPublicKey sets the WireGuard public key to include in the auth handshake.
+func (c *WSSClient) SetWGPublicKey(key []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.wgPubKey = make([]byte, len(key))
+	copy(c.wgPubKey, key)
 }
 
 // Connect establishes a WSS connection to the relay and authenticates.
@@ -87,12 +96,18 @@ func (c *WSSClient) Connect(ctx context.Context) (string, error) {
 	pubKey := c.signer.PublicKeyBytes()
 
 	// Send signed auth response
-	if err := c.writeControl(ctx, ControlMsg{
+	authPayload := ControlMsg{
 		Type:       MsgTypeAuth,
 		SUiAddress: c.suiAddress,
 		PublicKey:  hex.EncodeToString(pubKey),
 		Signature:  hex.EncodeToString(sig),
-	}); err != nil {
+	}
+	c.mu.Lock()
+	if len(c.wgPubKey) > 0 {
+		authPayload.WGPublicKey = hex.EncodeToString(c.wgPubKey)
+	}
+	c.mu.Unlock()
+	if err := c.writeControl(ctx, authPayload); err != nil {
 		conn.CloseNow()
 		return "", fmt.Errorf("send auth: %w", err)
 	}

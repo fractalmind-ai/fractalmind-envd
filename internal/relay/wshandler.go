@@ -26,11 +26,16 @@ type WSSHandler struct {
 	portMax  int
 	usedPort map[int]bool                // port → in-use
 	clients  map[string]*relayAllocation // SUI address → allocation
+
+	// Callbacks for WireGuard peer management on the relay node.
+	OnPeerConnected    func(suiAddr string, wgPubKey []byte, allocatedPort int)
+	OnPeerDisconnected func(suiAddr string)
 }
 
 // relayAllocation tracks one restricted client's relay state.
 type relayAllocation struct {
 	suiAddr  string
+	wgPubKey []byte
 	udpPort  int
 	udpConn  net.PacketConn
 	wsConn   *websocket.Conn
@@ -109,6 +114,22 @@ func (h *WSSHandler) handleClient(ctx context.Context, conn *websocket.Conn) {
 	suiAddr := authMsg.SUiAddress
 	log.Printf("[wss-relay] client authenticated: %s", suiAddr[:16])
 
+	// Decode and validate WireGuard public key from auth message (optional).
+	// Must be exactly 32 bytes and non-zero to be accepted.
+	var wgPubKey []byte
+	if authMsg.WGPublicKey != "" {
+		decoded, decErr := hex.DecodeString(authMsg.WGPublicKey)
+		if decErr != nil {
+			log.Printf("[wss-relay] invalid wg_public_key hex from %s: %v", suiAddr[:16], decErr)
+		} else if len(decoded) != 32 {
+			log.Printf("[wss-relay] rejecting wg_public_key from %s: expected 32 bytes, got %d", suiAddr[:16], len(decoded))
+		} else if isZeroWGKey(decoded) {
+			log.Printf("[wss-relay] rejecting wg_public_key from %s: all-zero key", suiAddr[:16])
+		} else {
+			wgPubKey = decoded
+		}
+	}
+
 	// Allocate a UDP port for this client
 	alloc, err := h.allocate(suiAddr, conn)
 	if err != nil {
@@ -116,12 +137,19 @@ func (h *WSSHandler) handleClient(ctx context.Context, conn *websocket.Conn) {
 		h.writeControl(ctx, conn, ControlMsg{Type: MsgTypeError, Endpoint: err.Error()})
 		return
 	}
+	alloc.wgPubKey = wgPubKey
 	defer h.release(suiAddr)
 
 	// Send allocated endpoint back to client
 	endpoint := fmt.Sprintf("%s:%d", h.publicIP, alloc.udpPort)
 	h.writeControl(ctx, conn, ControlMsg{Type: MsgTypeAllocated, Endpoint: endpoint})
 	log.Printf("[wss-relay] allocated %s for %s", endpoint, suiAddr[:16])
+
+	// Notify relay node to add WG peer for this client.
+	// wgPubKey is nil unless it passed all validation above (32 bytes, non-zero).
+	if h.OnPeerConnected != nil && len(wgPubKey) == 32 {
+		h.OnPeerConnected(suiAddr, wgPubKey, alloc.udpPort)
+	}
 
 	// Start UDP → WSS forwarder
 	go h.udpToWSS(alloc)
@@ -287,10 +315,9 @@ func (h *WSSHandler) allocate(suiAddr string, conn *websocket.Conn) (*relayAlloc
 // release frees a client's allocation.
 func (h *WSSHandler) release(suiAddr string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	alloc, ok := h.clients[suiAddr]
 	if !ok {
+		h.mu.Unlock()
 		return
 	}
 
@@ -299,6 +326,12 @@ func (h *WSSHandler) release(suiAddr string) {
 	h.usedPort[alloc.udpPort] = false
 	delete(h.clients, suiAddr)
 	log.Printf("[wss-relay] released port %d for %s", alloc.udpPort, suiAddr[:16])
+	h.mu.Unlock()
+
+	// Fire disconnection callback outside the lock to avoid contention
+	if h.OnPeerDisconnected != nil {
+		go h.OnPeerDisconnected(suiAddr)
+	}
 }
 
 func (h *WSSHandler) readControl(ctx context.Context, conn *websocket.Conn) (ControlMsg, error) {
@@ -406,4 +439,14 @@ func truncAddr(s string) string {
 		return s[:16]
 	}
 	return s
+}
+
+// isZeroWGKey returns true if every byte in key is zero.
+func isZeroWGKey(key []byte) bool {
+	for _, b := range key {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
