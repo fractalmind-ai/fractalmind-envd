@@ -24,55 +24,60 @@ func TestCoordinatorListsRegisteredWorkers(t *testing.T) {
 	conn := dialTestWebSocket(t, testServer.URL)
 	defer conn.Close()
 
-	sendWSMessage(t, conn, ws.Message{
-		Type: "register",
-		Payload: mustRawJSON(registerPayload{
-			HostID:   "node-1",
-			Hostname: "worker-a",
-			Version:  "1.2.3",
-		}),
-	})
-	sendWSMessage(t, conn, ws.Message{
-		Type: "heartbeat",
-		Payload: mustRawJSON(heartbeat.Payload{
-			HostID:    "node-1",
-			Hostname:  "worker-a",
-			Timestamp: time.Now(),
-			Agents: []agent.Agent{
-				{ID: "EMP_0001", Session: "EMP_0001", Status: "running"},
-			},
-			System: heartbeat.SystemInfo{
-				OS:     "linux",
-				Arch:   "amd64",
-				NumCPU: 8,
-			},
-			Uptime: 42,
-		}),
+	registerWorker(t, conn, "node-1", "worker-a", "1.2.3", heartbeat.Payload{
+		HostID:    "node-1",
+		Hostname:  "worker-a",
+		Timestamp: time.Now(),
+		Agents: []agent.Agent{
+			{ID: "EMP_0001", Session: "EMP_0001", Status: "running"},
+		},
+		System: heartbeat.SystemInfo{
+			OS:     "linux",
+			Arch:   "amd64",
+			NumCPU: 8,
+		},
+		Uptime: 42,
 	})
 
 	body := httpGet(t, testServer.URL+"/api/sentinels")
 
+	var raw struct {
+		Sentinels []map[string]interface{} `json:"sentinels"`
+		Count     int                      `json:"count"`
+	}
+	decodeJSON(t, body, &raw)
+
+	if raw.Count != 1 {
+		t.Fatalf("count = %d, want 1", raw.Count)
+	}
+	if len(raw.Sentinels) != 1 {
+		t.Fatalf("len(sentinels) = %d, want 1", len(raw.Sentinels))
+	}
+	if _, ok := raw.Sentinels[0]["agent_count"]; !ok {
+		t.Fatal("agent_count missing from sentinel summary")
+	}
+	if _, ok := raw.Sentinels[0]["agents"]; ok {
+		t.Fatal("agents field should not be present in sentinel summary response")
+	}
+
 	var resp struct {
-		Sentinels []nodeSnapshot `json:"sentinels"`
-		Count     int            `json:"count"`
+		Sentinels []sentinelSummary `json:"sentinels"`
+		Count     int               `json:"count"`
 	}
 	decodeJSON(t, body, &resp)
 
-	if resp.Count != 1 {
-		t.Fatalf("count = %d, want 1", resp.Count)
-	}
-	if len(resp.Sentinels) != 1 {
-		t.Fatalf("len(sentinels) = %d, want 1", len(resp.Sentinels))
-	}
 	if resp.Sentinels[0].Hostname != "worker-a" {
 		t.Fatalf("hostname = %q, want worker-a", resp.Sentinels[0].Hostname)
 	}
-	if len(resp.Sentinels[0].Agents) != 1 {
-		t.Fatalf("len(agents) = %d, want 1", len(resp.Sentinels[0].Agents))
+	if resp.Sentinels[0].AgentCount != 1 {
+		t.Fatalf("agent_count = %d, want 1", resp.Sentinels[0].AgentCount)
+	}
+	if resp.Sentinels[0].System == nil || resp.Sentinels[0].System.OS != "linux" {
+		t.Fatalf("unexpected system payload: %+v", resp.Sentinels[0].System)
 	}
 }
 
-func TestCoordinatorCommandProxy(t *testing.T) {
+func TestCoordinatorShellCommandProxy(t *testing.T) {
 	server := NewServer(":0", 2*time.Second)
 	testServer := httptest.NewServer(server.Handler())
 	defer testServer.Close()
@@ -80,14 +85,7 @@ func TestCoordinatorCommandProxy(t *testing.T) {
 	conn := dialTestWebSocket(t, testServer.URL)
 	defer conn.Close()
 
-	sendWSMessage(t, conn, ws.Message{
-		Type: "register",
-		Payload: mustRawJSON(registerPayload{
-			HostID:   "node-2",
-			Hostname: "worker-b",
-			Version:  "dev",
-		}),
-	})
+	registerWorker(t, conn, "node-2", "worker-b", "dev", heartbeat.Payload{})
 
 	commandDone := make(chan struct{})
 	go func() {
@@ -108,8 +106,12 @@ func TestCoordinatorCommandProxy(t *testing.T) {
 			t.Errorf("decode command payload: %v", err)
 			return
 		}
-		if payload.Command != "status" {
-			t.Errorf("command = %q, want status", payload.Command)
+		if payload.Command != "shell" {
+			t.Errorf("command = %q, want shell", payload.Command)
+			return
+		}
+		if payload.Args != "echo hello" {
+			t.Errorf("args = %q, want echo hello", payload.Args)
 			return
 		}
 
@@ -119,31 +121,53 @@ func TestCoordinatorCommandProxy(t *testing.T) {
 				RequestID: payload.RequestID,
 				Result: map[string]interface{}{
 					"success": true,
-					"agents": []agent.Agent{
-						{ID: "EMP_0002", Session: "EMP_0002", Status: "running"},
-					},
+					"output":  "hello\n",
 				},
 			}),
 		})
 	}()
 
 	body := httpPostJSON(t, testServer.URL+"/api/sentinels/node-2/command", commandRequest{
-		Command: "status",
+		Command: "shell",
+		Args:    "echo hello",
 	})
 	<-commandDone
 
 	var resp struct {
-		Success bool          `json:"success"`
-		Agents  []agent.Agent `json:"agents"`
+		Success bool   `json:"success"`
+		Output  string `json:"output"`
 	}
 	decodeJSON(t, body, &resp)
 
 	if !resp.Success {
 		t.Fatal("expected success=true")
 	}
-	if len(resp.Agents) != 1 || resp.Agents[0].ID != "EMP_0002" {
-		t.Fatalf("unexpected agents payload: %+v", resp.Agents)
+	if resp.Output != "hello\n" {
+		t.Fatalf("output = %q, want hello\\n", resp.Output)
 	}
+}
+
+func registerWorker(t *testing.T, conn *websocket.Conn, hostID, hostname, version string, hb heartbeat.Payload) {
+	t.Helper()
+
+	sendWSMessage(t, conn, ws.Message{
+		Type: "register",
+		Payload: mustRawJSON(registerPayload{
+			HostID:   hostID,
+			Hostname: hostname,
+			Version:  version,
+		}),
+	})
+
+	if hb.HostID == "" && hb.Hostname == "" && hb.Timestamp.IsZero() && hb.System == (heartbeat.SystemInfo{}) &&
+		hb.Uptime == 0 && len(hb.Agents) == 0 && hb.RelayLoad == nil {
+		return
+	}
+
+	sendWSMessage(t, conn, ws.Message{
+		Type:    "heartbeat",
+		Payload: mustRawJSON(hb),
+	})
 }
 
 func dialTestWebSocket(t *testing.T, serverURL string) *websocket.Conn {

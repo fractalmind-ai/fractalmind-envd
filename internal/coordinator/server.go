@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/fractalmind-ai/fractalmind-envd/internal/heartbeat"
 	"github.com/gorilla/websocket"
 )
 
@@ -16,6 +17,18 @@ type commandRequest struct {
 	Command string `json:"command"`
 	AgentID string `json:"agent_id"`
 	Args    string `json:"args"`
+}
+
+type sentinelSummary struct {
+	ID            string                `json:"id"`
+	HostID        string                `json:"host_id"`
+	Hostname      string                `json:"hostname"`
+	Version       string                `json:"version"`
+	ConnectedAt   time.Time             `json:"connected_at"`
+	LastHeartbeat *time.Time            `json:"last_heartbeat"`
+	AgentCount    int                   `json:"agent_count"`
+	UptimeSeconds int64                 `json:"uptime_seconds"`
+	System        *heartbeat.SystemInfo `json:"system"`
 }
 
 // Server exposes the embedded coordinator REST and WebSocket API.
@@ -111,9 +124,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleListSentinels(w http.ResponseWriter, _ *http.Request) {
 	nodes := s.manager.ListNodes()
+	summaries := make([]sentinelSummary, 0, len(nodes))
+	for _, node := range nodes {
+		summaries = append(summaries, sentinelSummary{
+			ID:            node.ID,
+			HostID:        node.HostID,
+			Hostname:      node.Hostname,
+			Version:       node.Version,
+			ConnectedAt:   node.ConnectedAt,
+			LastHeartbeat: node.LastHeartbeat,
+			AgentCount:    len(node.Agents),
+			UptimeSeconds: node.UptimeSeconds,
+			System:        node.System,
+		})
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"sentinels": nodes,
-		"count":     len(nodes),
+		"sentinels": summaries,
+		"count":     len(summaries),
 	})
 }
 
