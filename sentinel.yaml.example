@@ -8,10 +8,13 @@ identity:
 # Roles control which capabilities this node provides.
 # relay + stun_server auto-enable when a public IP is detected (via STUN probe).
 roles:
-  coordinator: false   # REST API management interface
+  coordinator: false   # Embedded REST + WebSocket control plane
   sponsor: false       # Org-level gas sponsorship (requires sponsor.org_wallet_path)
   # relay: null        # Auto-detect (public IP → true). Set true/false to override.
   # stun_server: null  # Auto-detect (public IP → true). Set true/false to override.
+
+coordinator:
+  listen_addr: ":8080" # Bind address for the embedded coordinator API when roles.coordinator=true
 
 agents:
   scan_method: tmux    # tmux | systemd | docker
@@ -81,7 +84,8 @@ relay:
   wss_port_min: 51900                  # UDP port pool start for WSS relay allocations
   wss_port_max: 51999                  # UDP port pool end for WSS relay allocations
 
-# Legacy: Gateway WebSocket (kept for backwards-compatibility, not used in v3 P2P mode)
+# Worker-side coordinator target.
+# Non-coordinator nodes connect here for heartbeat + remote commands.
 gateway:
   url: ws://localhost:8080/ws
   reconnect_interval: 5s

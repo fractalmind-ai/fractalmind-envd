@@ -17,7 +17,7 @@
 `envd` (environment daemon) runs on each machine hosting AI Agents. It:
 
 1. **Discovers** local AI agents (tmux sessions)
-2. **Reports** status via heartbeat to a Gateway
+2. **Reports** status via heartbeat to a coordinator envd
 3. **Executes** remote commands (restart, logs, kill, shell)
 4. **Self-heals** — auto-restarts crashed agents within 60 seconds
 
@@ -26,16 +26,16 @@ Unlike traditional remote control tools (TeamViewer, Tailscale), envd uses **SUI
 ## Architecture
 
 ```
-SUI Blockchain          Identity + Authorization
+SUI Blockchain               Identity + Authorization
        │
-   Gateway              WebSocket server + REST API
+coordinator envd             Embedded REST API + WebSocket control plane
        │
   ┌────┴────┐
   │         │
- envd     envd          Go daemon (this repo)
-host-A   host-B         Heartbeat + Agent discovery + Self-heal
+ envd     envd               Go daemon (this repo)
+host-A   host-B              Heartbeat + Agent discovery + Self-heal
   │         │
-tmux      tmux          AI Agent processes
+tmux      tmux               AI Agent processes
 ```
 
 ## Quick Start
@@ -48,7 +48,7 @@ make build
 
 # Configure
 cp sentinel.yaml.example sentinel.yaml
-# Edit gateway URL, identity, etc.
+# Edit coordinator address, gateway URL, identity, etc.
 
 # Run
 ./bin/envd --config sentinel.yaml
@@ -130,10 +130,13 @@ See [`sentinel.yaml.example`](sentinel.yaml.example) for all options.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `gateway.url` | `ws://localhost:8080/ws` | Gateway WebSocket URL |
+| `coordinator.listen_addr` | `:8080` | Bind address for the embedded coordinator API |
+| `gateway.url` | `ws://localhost:8080/ws` | Coordinator WebSocket URL for worker nodes |
 | `agents.scan_method` | `tmux` | Agent discovery method |
 | `agents.auto_restart` | `true` | Auto-restart crashed agents |
 | `heartbeat.interval` | `30s` | Heartbeat frequency |
+
+`roles.coordinator=true` now starts the REST API and WebSocket server inside `envd`. Worker nodes still use `gateway.url` as the transport target, so point it at the coordinator node, for example `ws://10.87.12.34:8080/ws`.
 
 ## Remote Commands
 

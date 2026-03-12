@@ -15,6 +15,7 @@ import (
 
 	"github.com/fractalmind-ai/fractalmind-envd/internal/agent"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/config"
+	"github.com/fractalmind-ai/fractalmind-envd/internal/coordinator"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/heartbeat"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/relay"
 	"github.com/fractalmind-ai/fractalmind-envd/internal/relaypicker"
@@ -185,6 +186,7 @@ func main() {
 	var stunOnlyServer *relay.StunOnlyServer
 	var wssHandler *relay.WSSHandler
 	var wssClient *relay.WSSClient
+	var coordinatorServer *coordinator.Server
 
 	if activeRoles.Relay {
 		// Extract bare IP from "ip:port" endpoint
@@ -274,8 +276,11 @@ func main() {
 	}
 
 	if activeRoles.Coordinator {
-		log.Printf("[coordinator] REST API enabled")
-		// REST API already exists in current codebase
+		coordinatorServer = coordinator.NewServer(cfg.Coordinator.ListenAddr, 30*time.Second)
+		if err := coordinatorServer.Start(); err != nil {
+			log.Fatalf("[coordinator] failed to start server on %s: %v", cfg.Coordinator.ListenAddr, err)
+		}
+		log.Printf("[coordinator] REST API listening on %s (routes: /api, /ws)", cfg.Coordinator.ListenAddr)
 	}
 
 	// ======= WSS relay client (for UDP-restricted nodes) =======
@@ -469,6 +474,13 @@ func main() {
 				if err := wgManager.Close(); err != nil {
 					log.Printf("[wg] close failed: %v", err)
 				}
+			}
+			if coordinatorServer != nil {
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				if err := coordinatorServer.Shutdown(shutdownCtx); err != nil {
+					log.Printf("[coordinator] shutdown failed: %v", err)
+				}
+				cancel()
 			}
 
 			wsClient.Close()

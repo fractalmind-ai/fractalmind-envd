@@ -8,17 +8,19 @@ import (
 
 // Config is the sentinel.yaml configuration.
 type Config struct {
-	Identity  IdentityConfig  `yaml:"identity"`
-	Roles     RolesConfig     `yaml:"roles"`
-	Agents    AgentsConfig    `yaml:"agents"`
-	Heartbeat HeartbeatConfig `yaml:"heartbeat"`
-	SUI       SUIConfig       `yaml:"sui"`
-	WireGuard WireGuardConfig `yaml:"wireguard"`
-	STUN      STUNConfig      `yaml:"stun"`
-	Sponsor   SponsorConfig   `yaml:"sponsor"`
-	Relay     RelayConfig     `yaml:"relay"`
+	Identity    IdentityConfig    `yaml:"identity"`
+	Roles       RolesConfig       `yaml:"roles"`
+	Coordinator CoordinatorConfig `yaml:"coordinator"`
+	Agents      AgentsConfig      `yaml:"agents"`
+	Heartbeat   HeartbeatConfig   `yaml:"heartbeat"`
+	SUI         SUIConfig         `yaml:"sui"`
+	WireGuard   WireGuardConfig   `yaml:"wireguard"`
+	STUN        STUNConfig        `yaml:"stun"`
+	Sponsor     SponsorConfig     `yaml:"sponsor"`
+	Relay       RelayConfig       `yaml:"relay"`
 
-	// Legacy: Gateway config kept for backwards-compatibility but not used in v3
+	// Gateway config is the worker-side transport target.
+	// Workers connect to the coordinator envd WebSocket at this URL.
 	Gateway GatewayConfig `yaml:"gateway"`
 }
 
@@ -29,6 +31,10 @@ type RolesConfig struct {
 	Sponsor     bool  `yaml:"sponsor"`
 	Relay       *bool `yaml:"relay"`       // nil = auto-detect, true/false = override
 	StunServer  *bool `yaml:"stun_server"` // nil = auto-detect, true/false = override
+}
+
+type CoordinatorConfig struct {
+	ListenAddr string `yaml:"listen_addr"`
 }
 
 type GatewayConfig struct {
@@ -124,6 +130,9 @@ func DefaultConfig() *Config {
 			Sponsor:     false,
 			Relay:       nil, // auto-detect
 			StunServer:  nil, // auto-detect
+		},
+		Coordinator: CoordinatorConfig{
+			ListenAddr: ":8080",
 		},
 		Agents: AgentsConfig{
 			ScanMethod:         "tmux",
