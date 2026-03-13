@@ -1,7 +1,7 @@
 // Package roles manages the envd role system.
 // Roles determine which capabilities a node provides:
 //   - worker:      Always active. Agent management + P2P heartbeat.
-//   - coordinator: REST API management interface (manual enable).
+//   - coordinator: Embedded REST + WebSocket control plane (manual enable).
 //   - relay:       WireGuard packet forwarding (auto: public IP, or manual).
 //   - stun_server: STUN NAT discovery service (auto: public IP, or manual).
 //   - sponsor:     Org-level gas sponsorship (manual enable, needs org wallet).
